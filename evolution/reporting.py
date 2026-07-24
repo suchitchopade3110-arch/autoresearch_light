@@ -9,6 +9,7 @@ def log_generation_report(
     compute_time_spent: float,
     convergence_signal: bool,
     duplicate_avoidance_count: int,
+    duplicate_exhausted_count: int = 0,
     log_file: str = "evolution_report.jsonl"
 ):
     valid_scores = sorted([c['composite_score'] for c in scored_candidates if 'composite_score' in c])
@@ -31,7 +32,8 @@ def log_generation_report(
         "score_distribution": valid_scores,
         "convergence_signal": convergence_signal,
         "compute_time_spent": compute_time_spent,
-        "duplicate_avoidance_count": duplicate_avoidance_count
+        "duplicate_avoidance_count": duplicate_avoidance_count,
+        "duplicate_exhausted_count": duplicate_exhausted_count
     }
 
     with open(log_file, "a") as f:

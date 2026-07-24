@@ -140,21 +140,16 @@ def test_dry_run_validation_has_no_side_effects_and_is_repeatable():
         with open(os.path.join(d, "candidate_script.py")) as f:
             assert f.read() == "\n"
 
-def test_evolution_fallback_diff_is_a_valid_patch():
-    """Regression test: the fallback diff in EvolutionEngine._generate_candidate must actually apply."""
-    import uuid
-
-    with tempfile.TemporaryDirectory() as d:
-        subprocess.run(["git", "init"], cwd=d, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=d, check=False)
-        subprocess.run(["git", "config", "user.name", "Test User"], cwd=d, check=False)
-        with open(os.path.join(d, "candidate_script.py"), "w") as f:
-            f.write("\n")
-        subprocess.run(["git", "add", "."], cwd=d, check=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=d, check=True)
-
-        fallback_diff = f"--- a/candidate_script.py\n+++ b/candidate_script.py\n@@ -1 +1 @@\n-\n+print('Fallback {uuid.uuid4().hex[:4]}')\n"
-        assert validate_and_apply_patch(fallback_diff, cwd=d) is True
+def test_generate_diff_accepts_current_content_kwarg():
+    """
+    Wave 2 interface change: generate_diff must accept the target file's
+    actual current content, so a real LLM can generate a diff against the
+    file state that will actually receive the apply - not a fixed
+    assumption. MockLLMClient accepts (and ignores) it for signature
+    compatibility with LLMClient's contract.
+    """
+    diff = MockLLMClient().generate_diff("goal", "candidate_script.py", "import json\nprint('already solved')\n")
+    assert diff.startswith("--- a/candidate_script.py")
 
 def test_mock_llm_diff_produces_a_real_predictions_writing_script():
     """

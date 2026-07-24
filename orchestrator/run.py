@@ -16,7 +16,7 @@ from orchestrator.metrics import calculate_all_metrics
 from memory.db import ExperimentDB
 from memory.failure_analysis import analyze_failure
 from generation.prompt_builder import PromptBuilder
-from generation.patch_generator import PatchGenerator, MockLLMClient
+from generation.patch_generator import PatchGenerator, MockLLMClient, AnthropicClient
 from generation.static_check import check_syntax
 
 # Phase 4 imports
@@ -63,8 +63,16 @@ def main():
 
     # Initialize Phase 2 components
     db = ExperimentDB()
-    prompt_builder = PromptBuilder(db, config.get('generation', {}))
-    llm_client = MockLLMClient()
+    gen_cfg = config.get('generation', {})
+    prompt_builder = PromptBuilder(db, gen_cfg)
+    # generation.client defaults to "mock" so the test suite needs no
+    # network access or API key. Only "anthropic" reads ANTHROPIC_API_KEY
+    # (via the SDK's own env lookup) - never from config, so a committed
+    # config file can never leak a key.
+    if gen_cfg.get('client') == 'anthropic':
+        llm_client = AnthropicClient(model=gen_cfg.get('model', 'claude-sonnet-5'))
+    else:
+        llm_client = MockLLMClient()
     patch_generator = PatchGenerator(llm_client)
 
     # Phase 4: human-approval gate. resolve_approval_config (inside the gate)
@@ -112,6 +120,9 @@ def main():
 
         print("Generating and applying patch...")
         apply_success, diff = patch_generator.generate_and_apply(prompt, "candidate_script.py", cwd=worktree_path)
+        # Only AnthropicClient sets this - MockLLMClient makes no API calls,
+        # so there's no cost to attribute.
+        generation_usage = getattr(patch_generator.llm_client, "last_usage", {}) or {}
 
         if not apply_success:
             print("Patch application failed (malformed diff). Rejecting candidate.")
@@ -202,6 +213,10 @@ def main():
 
         metrics['baseline_score'] = baseline_score
         metrics['delta'] = delta
+        if generation_usage:
+            metrics['generation_input_tokens'] = generation_usage.get('input_tokens', 0)
+            metrics['generation_output_tokens'] = generation_usage.get('output_tokens', 0)
+            metrics['generation_cost_usd'] = generation_usage.get('estimated_cost_usd', 0.0)
 
         # 5. Analyze failure and log to Memory
         if below_baseline:

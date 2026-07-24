@@ -7,3 +7,4 @@ uvicorn>=0.25
 jinja2>=3.1
 httpx>=0.25
 python-multipart>=0.0.9
+anthropic>=0.119

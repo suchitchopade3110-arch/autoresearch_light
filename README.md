@@ -15,12 +15,12 @@ An autonomous ML research agent loop: propose a candidate (as a diff), apply and
 - **Experiment Memory (RAG) (`memory/db.py`):** a local ChromaDB instance storing hypotheses, diffs, outcomes, metrics, and rationale per experiment (cosine distance, so `evolution/duplicate_checker.py`'s similarity threshold is meaningful).
 - **Failure Analysis (`memory/failure_analysis.py`):** categorizes failures (syntax, runtime, timeout, resource-limit, metric-regression).
 - **Prompt Builder (`generation/prompt_builder.py`):** retrieves past successes/failures from memory into the next prompt.
-- **Patch Generation (`generation/patch_generator.py`):** validates and applies unified diffs; `MockLLMClient` is the placeholder generator - it emits a script that implements the honest solution and writes real predictions (see above), so the eval pipeline has something genuine to gate on even before a real LLM is wired in.
+- **Patch Generation (`generation/patch_generator.py`):** validates and applies unified diffs against `LLMClient.generate_diff(prompt, target_file, current_content)` - every call includes the target file's real current content, so a real model writes a diff against what's actually there rather than a stale assumption. Two implementations: `MockLLMClient` (default, no network/key needed - always implements the same honest baseline solution) and `AnthropicClient` (`generation.client: anthropic` in config; reads `ANTHROPIC_API_KEY` from the environment, never from config). `AnthropicClient` retries up to 3 times on a `git apply --check` failure, feeding the actual stderr back into the next prompt, and records `input_tokens`/`output_tokens`/`estimated_cost_usd` into every candidate's metrics and the end-of-run report.
 - **Static Analysis Pre-check (`generation/static_check.py`):** rejects malformed/invalid syntax before sandbox execution.
 - **Multi-objective scoring (`evolution/scoring.py`):** a candidate's real evaluation score drives selection, and a failed candidate can never outrank a successful one under either scoring strategy regardless of how fast it failed.
 
 ## What's NOT implemented yet
-- **Real LLM integration.** `MockLLMClient` always returns the same diff regardless of prompt/history - implement the `LLMClient` interface with a real model to get genuinely different candidates per iteration. Because the mock's diff assumes a fixed starting file, concurrent evolutionary candidates whose worktree is created *after* an earlier candidate in the same generation has already merged will fail to apply (the file has moved on) - this is expected with a non-context-aware mock, not a bug, and goes away once a real LLM sees the file's current content in its prompt.
+- **`MockLLMClient` always returns the same diff regardless of prompt/history.** This is deliberate - it's the zero-setup default with no network or API key needed, not a bug. Set `generation.client: anthropic` for a real, context-aware model.
 - **Dashboard authentication.** The approval dashboard has no auth - anyone who can reach it can approve or reject. Fine for local/single-user use; add auth before exposing it beyond localhost.
 - **Carbon-footprint methodology.** `energy_estimate` is `execution_time * energy_watts_constant` (an arbitrary multiplier, default 10.0), not a real methodology like CodeCarbon or a grid-intensity constant - it's a placeholder signal for relative comparison between candidates, not an absolute measurement.
 
@@ -112,6 +112,8 @@ generation:
   max_retrieved_failures: 2
   max_retrieved_successes: 2
   prompt_char_budget: 4000
+  client: mock                      # or "anthropic" - needs ANTHROPIC_API_KEY in the environment
+  # model: claude-sonnet-5          # anthropic only, defaults to claude-sonnet-5
 
 approval:                          # both modes - see Security Disclaimer above
   enabled: true                    # missing/malformed config also defaults to true
