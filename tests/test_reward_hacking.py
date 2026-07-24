@@ -68,17 +68,26 @@ def test_truth_json_never_referenced_by_the_sandbox_executor():
 
 
 def test_truth_json_absent_from_every_docker_mount_argument_repo_wide():
-    """Belt-and-suspenders sweep: grep the whole repo (excluding this test itself) for truth.json near a mount/docker construct."""
-    result = subprocess.run(
-        ["grep", "-rn", "truth.json",
-         "--include=*.py",
-         "--exclude=test_reward_hacking.py",
-         "--exclude=test_sandbox.py",  # asserts truth.json is NOT visible in-container - a legitimate reference
-         REPO_ROOT],
-        capture_output=True, text=True,
-    )
-    offending = [
-        line for line in result.stdout.splitlines()
-        if "-v" in line or "docker" in line.lower() or "/app/" in line
-    ]
+    """
+    Belt-and-suspenders sweep: scan the whole repo (excluding this test file
+    and test_sandbox.py, which legitimately reference truth.json to prove
+    it's NOT visible in-container) for truth.json appearing near a
+    mount/docker construct. Pure Python, not a shelled-out grep - grep
+    isn't guaranteed to exist (e.g. on Windows).
+    """
+    excluded = {"test_reward_hacking.py", "test_sandbox.py"}
+    offending = []
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "venv", ".candidate_worktrees")]
+        for filename in filenames:
+            if not filename.endswith(".py") or filename in excluded:
+                continue
+            path = os.path.join(dirpath, filename)
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, start=1):
+                    if "truth.json" not in line:
+                        continue
+                    if "-v" in line or "docker" in line.lower() or "/app/" in line:
+                        offending.append(f"{path}:{lineno}:{line.rstrip()}")
+
     assert offending == [], "truth.json appears near a mount/docker construct:\n" + "\n".join(offending)
