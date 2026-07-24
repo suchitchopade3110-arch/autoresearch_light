@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import pytest
@@ -70,35 +71,69 @@ def test_sandbox_failure(sandbox):
     finally:
         os.remove(script_path)
 
-def test_sandbox_env_vars_and_dataset_mount():
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as data_f:
-        data_f.write('{"x1": 1.0}\n')
-        dataset_path = data_f.name
+def test_sandbox_train_test_mount():
+    with tempfile.TemporaryDirectory() as dataset_dir:
+        with open(os.path.join(dataset_dir, "train.jsonl"), "w") as f:
+            f.write(json.dumps({"x1": 1.0, "x2": 0.5, "label": 1}) + "\n")
+        with open(os.path.join(dataset_dir, "test.jsonl"), "w") as f:
+            f.write(json.dumps({"id": 0, "x1": 0.2, "x2": -0.1}) + "\n")
+        # truth.json lives alongside train/test but is never mounted - see
+        # sandbox/executor.py and test_reward_hacking.py.
+        with open(os.path.join(dataset_dir, "truth.json"), "w") as f:
+            f.write(json.dumps({"0": 1}))
 
-    config = {'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m"}
-    sandbox_with_dataset = SandboxExecutor(config, dataset_path=dataset_path)
+        config = {'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m"}
+        sandbox_with_dataset = SandboxExecutor(config, dataset_dir=dataset_dir)
 
-    script_content = (
-        "import os\n"
-        "print('SUBSET_PERCENTAGE=' + os.environ.get('SUBSET_PERCENTAGE', 'missing'))\n"
-        "print('DATASET_PATH=' + os.environ.get('DATASET_PATH', 'missing'))\n"
-        "print(open(os.environ['DATASET_PATH']).read())\n"
-    )
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(script_content)
-        script_path = f.name
+        script_content = (
+            "import os\n"
+            "print('SUBSET_PERCENTAGE=' + os.environ.get('SUBSET_PERCENTAGE', 'missing'))\n"
+            "print('TRAIN_PATH=' + os.environ.get('TRAIN_PATH', 'missing'))\n"
+            "print('TEST_PATH=' + os.environ.get('TEST_PATH', 'missing'))\n"
+            "print(open(os.environ['TRAIN_PATH']).read())\n"
+            "print(open(os.environ['TEST_PATH']).read())\n"
+            "print('TRUTH_VISIBLE=' + str(os.path.exists('/app/data/truth.json')))\n"
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
 
-    try:
-        abs_script = os.path.abspath(script_path)
-        result = sandbox_with_dataset.run_candidate(abs_script, env_vars={"SUBSET_PERCENTAGE": "5"})
+        try:
+            abs_script = os.path.abspath(script_path)
+            result = sandbox_with_dataset.run_candidate(abs_script, env_vars={"SUBSET_PERCENTAGE": "5"})
 
-        assert result['exit_code'] == 0
-        assert "SUBSET_PERCENTAGE=5" in result['stdout']
-        assert "DATASET_PATH=/app/data/dataset.jsonl" in result['stdout']
-        assert '"x1": 1.0' in result['stdout']
-    finally:
-        os.remove(script_path)
-        os.remove(dataset_path)
+            assert result['exit_code'] == 0
+            assert "SUBSET_PERCENTAGE=5" in result['stdout']
+            assert "TRAIN_PATH=/app/data/train.jsonl" in result['stdout']
+            assert "TEST_PATH=/app/data/test.jsonl" in result['stdout']
+            assert '"x1": 1.0' in result['stdout']
+            assert '"id": 0' in result['stdout']
+            assert "TRUTH_VISIBLE=False" in result['stdout']
+        finally:
+            os.remove(script_path)
+
+def test_sandbox_out_dir_is_writable_and_survives_the_container(sandbox):
+    with tempfile.TemporaryDirectory() as out_dir:
+        script_content = (
+            "import json\n"
+            "with open('/app/out/predictions.jsonl', 'w') as f:\n"
+            "    f.write(json.dumps({'id': 0, 'pred': 1}) + '\\n')\n"
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+
+        try:
+            abs_path = os.path.abspath(script_path)
+            result = sandbox.run_candidate(abs_path, out_dir=out_dir)
+            assert result['exit_code'] == 0
+
+            pred_path = os.path.join(out_dir, "predictions.jsonl")
+            assert os.path.exists(pred_path)
+            with open(pred_path) as f:
+                assert json.loads(f.read().strip()) == {"id": 0, "pred": 1}
+        finally:
+            os.remove(script_path)
 
 def test_sandbox_has_no_network_access(sandbox):
     script_content = (

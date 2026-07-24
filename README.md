@@ -11,11 +11,11 @@ An autonomous ML research agent loop: propose a candidate (as a diff), apply and
 - **Report generator (`reporting/report_generator.py`):** `compute_kpis()` is the single function both the dashboard and the end-of-run report (`reports/latest_report.md`, written automatically when a run finishes) call - so the two surfaces can't independently recompute the same numbers differently. Tracks merge rate, duplicate-avoidance rate, compute cost per improvement, and approval outcomes.
 - **Git State Controller (`vcs/git_controller.py`):** every candidate gets its own `git worktree`, so branching, committing, merging, and rolling back a candidate never touches the caller's main checkout (or any uncommitted work in it) - and concurrent candidates in the evolutionary path never share a checkout with each other.
 - **Execution Sandbox (`sandbox/executor.py`):** runs each candidate in Docker as a non-root user, with `--network none`, a read-only root filesystem, dropped capabilities, and the existing CPU/memory limits and wall-clock timeout.
-- **Real evaluation pipeline (`eval/dataset.py`, `eval/pipeline.py`):** a deterministic synthetic dataset (a noisy linear boundary) with nested percentage subsets. Both orchestrator modes execute the candidate once per progressive-scaling stage (passing `SUBSET_PERCENTAGE`) and parse the candidate's actual reported `SCORE:` - no mocked or randomized scores.
+- **Real evaluation pipeline (`eval/dataset.py`, `eval/pipeline.py`):** a deterministic synthetic dataset (a noisy linear boundary), split into `train.jsonl`/`test.jsonl` (both mounted read-only into the sandbox) and `truth.json` (the held-out labels - stays on the host, never mounted). A candidate reads `TRAIN_PATH`/`TEST_PATH`/`SUBSET_PERCENTAGE`, and writes real predictions to `/app/out/predictions.jsonl`, which `EvalPipeline.score_predictions()` scores against `truth.json`. A printed `SCORE:` line is parsed only as a diagnostic to flag a mismatch between what the candidate claims and its real score - it is never trusted for gating, so a candidate cannot buy a merge by printing a perfect score claim (see `tests/test_reward_hacking.py`). A merge also requires beating the best-known score for that stage by `eval.min_improvement` (`eval/baseline.py`), not just clearing the stage's absolute threshold.
 - **Experiment Memory (RAG) (`memory/db.py`):** a local ChromaDB instance storing hypotheses, diffs, outcomes, metrics, and rationale per experiment (cosine distance, so `evolution/duplicate_checker.py`'s similarity threshold is meaningful).
 - **Failure Analysis (`memory/failure_analysis.py`):** categorizes failures (syntax, runtime, timeout, resource-limit, metric-regression).
 - **Prompt Builder (`generation/prompt_builder.py`):** retrieves past successes/failures from memory into the next prompt.
-- **Patch Generation (`generation/patch_generator.py`):** validates and applies unified diffs; `MockLLMClient` is the placeholder generator - it emits a real, dataset-driven script (reads `DATASET_PATH`/`SUBSET_PERCENTAGE`, prints an actual `SCORE:`), not a hardcoded score, so the eval pipeline has something genuine to gate on even before a real LLM is wired in.
+- **Patch Generation (`generation/patch_generator.py`):** validates and applies unified diffs; `MockLLMClient` is the placeholder generator - it emits a script that implements the honest solution and writes real predictions (see above), so the eval pipeline has something genuine to gate on even before a real LLM is wired in.
 - **Static Analysis Pre-check (`generation/static_check.py`):** rejects malformed/invalid syntax before sandbox execution.
 - **Multi-objective scoring (`evolution/scoring.py`):** a candidate's real evaluation score drives selection, and a failed candidate can never outrank a successful one under either scoring strategy regardless of how fast it failed.
 
@@ -76,9 +76,10 @@ sandbox:
   memory_limit: "256m"
 
 dataset:
-  path: "dummy_data/dataset.jsonl"  # generated once if it doesn't exist
+  path: "dummy_data"  # directory - train.jsonl/test.jsonl/truth.json generated once if missing
   size: 1000
   seed: 42
+  test_frac: 0.25
 
 eval:
   stages:                          # progressive scaling
@@ -90,6 +91,8 @@ eval:
       threshold: 0.7
     - subset_percentage: 100
       threshold: 0.8
+  min_improvement: 0.001           # a merge must also beat the best-known score for its final stage by this much
+  state_path: "state.json"         # persisted best-known score per stage
 
 orchestrator:                      # sequential mode only
   max_iterations: 1

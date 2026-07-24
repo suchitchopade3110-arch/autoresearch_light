@@ -156,11 +156,14 @@ def test_evolution_fallback_diff_is_a_valid_patch():
         fallback_diff = f"--- a/candidate_script.py\n+++ b/candidate_script.py\n@@ -1 +1 @@\n-\n+print('Fallback {uuid.uuid4().hex[:4]}')\n"
         assert validate_and_apply_patch(fallback_diff, cwd=d) is True
 
-def test_mock_llm_diff_produces_a_real_dataset_driven_script():
+def test_mock_llm_diff_produces_a_real_predictions_writing_script():
     """
     The mock diff replaces a blank placeholder file with a script that
-    reads DATASET_PATH/SUBSET_PERCENTAGE and prints a real SCORE - not a
-    hardcoded number - so the eval pipeline gets a genuine result to gate on.
+    reads TRAIN_PATH/TEST_PATH/SUBSET_PERCENTAGE and writes real
+    predictions to /app/out/predictions.jsonl - that's what the eval
+    pipeline actually scores. It also prints a diagnostic SCORE - but that
+    line is never trusted for gating (see eval/pipeline.py and
+    test_reward_hacking.py).
     """
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "init"], cwd=d, check=True)
@@ -180,15 +183,16 @@ def test_mock_llm_diff_produces_a_real_dataset_driven_script():
 
         with open(script_path) as f:
             content = f.read()
-        assert "DATASET_PATH" in content
+        assert "TRAIN_PATH" in content
+        assert "TEST_PATH" in content
         assert "SUBSET_PERCENTAGE" in content
-        assert "SCORE:" in content
-        assert "MOCK_SCORE" not in content
-        # Regression: the hunk header once declared fewer lines than it
-        # actually added (30 vs the real 34), which some git versions
-        # silently truncate to on apply rather than reject outright - the
-        # entry-point guard was exactly what got cut, so main() was defined
-        # but never called and the script produced no output at all.
+        assert "predictions.jsonl" in content
+        assert "SCORE:" in content  # diagnostic only, see above
+        assert "truth" not in content.lower()  # the mock never sees held-out labels
+        # Regression: a wrong hunk header line count is what a stricter git
+        # silently truncates a patch to, rather than rejecting outright -
+        # the entry-point guard was exactly what got cut once, so main()
+        # was defined but never called and the script produced no output.
         assert 'if __name__ == "__main__":' in content
         assert content.strip().endswith("main()")
 

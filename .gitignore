@@ -5,3 +5,4 @@ dummy_data/
 evolution_report.jsonl
 approvals.db
 reports/
+state.json

@@ -7,7 +7,8 @@ import yaml
 
 from vcs.git_controller import GitController
 from sandbox.executor import SandboxExecutor
-from eval.dataset import generate_dataset
+from eval.dataset import generate_split, load_truth
+from eval.baseline import BaselineStore
 from eval.pipeline import EvalPipeline
 from orchestrator.metrics import calculate_all_metrics
 
@@ -39,14 +40,26 @@ def main():
 
     orch_cfg = config.get('orchestrator', {})
     dataset_cfg = config.get('dataset', {})
+    eval_cfg = config.get('eval', {})
 
-    dataset_path = dataset_cfg.get('path', 'dummy_data/dataset.jsonl')
-    generate_dataset(dataset_path, n_samples=dataset_cfg.get('size', 1000), seed=dataset_cfg.get('seed', 42))
+    dataset_dir = dataset_cfg.get('path', 'dummy_data')
+    dataset_paths = generate_split(
+        dataset_dir,
+        n=dataset_cfg.get('size', 1000),
+        seed=dataset_cfg.get('seed', 42),
+        test_frac=dataset_cfg.get('test_frac', 0.25),
+    )
+    # truth.json is loaded host-side only - it is never mounted into the
+    # sandbox (see sandbox/executor.py), so a candidate can never read its
+    # own answer key off disk.
+    truth = load_truth(dataset_paths['truth'])
 
     # Initialize components
     vcs = GitController()
-    sandbox = SandboxExecutor(config.get('sandbox', {}), dataset_path=dataset_path)
-    evaluator = EvalPipeline(config.get('eval', {}))
+    sandbox = SandboxExecutor(config.get('sandbox', {}), dataset_dir=dataset_dir)
+    evaluator = EvalPipeline(eval_cfg)
+    baseline_store = BaselineStore(eval_cfg.get('state_path', 'state.json'))
+    min_improvement = eval_cfg.get('min_improvement', 0.001)
 
     # Initialize Phase 2 components
     db = ExperimentDB()
@@ -73,6 +86,8 @@ def main():
             prompt_builder=prompt_builder,
             db=db,
             approval_store=approval_store,
+            truth=truth,
+            baseline_store=baseline_store,
         )
         engine.run(args.goal)
         generate_report(db, approval_store)
@@ -130,9 +145,16 @@ def main():
             return False, 0.0
 
         # 4. Execute in sandbox once per progressive-scaling stage, so each
-        # stage's score reflects that stage's own dataset subset.
+        # stage's score reflects that stage's own dataset subset. Each run
+        # writes predictions.jsonl to out_dir - that, scored against
+        # held-out truth, is the only real score; anything the candidate
+        # prints is a diagnostic at best (see eval/pipeline.py).
+        out_dir = os.path.join(worktree_path, ".eval_out")
+        pred_path = os.path.join(out_dir, "predictions.jsonl")
+
         eval_passed = True
         final_score = 0.0
+        last_subset = None
         metrics = {}
         execution_result = None
 
@@ -141,7 +163,9 @@ def main():
             threshold = stage['threshold']
 
             print(f"Running in sandbox (subset={subset}%)...")
-            execution_result = sandbox.run_candidate(script_path, env_vars={"SUBSET_PERCENTAGE": str(subset)})
+            execution_result = sandbox.run_candidate(
+                script_path, env_vars={"SUBSET_PERCENTAGE": str(subset)}, out_dir=out_dir
+            )
 
             if execution_result['timeout']:
                 print("Execution TIMED OUT")
@@ -149,7 +173,8 @@ def main():
             metrics = calculate_all_metrics(execution_result)
             print(f"Plugin Metrics: {metrics}")
 
-            stage_success, final_score = evaluator.evaluate_stage(execution_result, subset, threshold)
+            stage_success, final_score = evaluator.evaluate_stage(execution_result, subset, threshold, pred_path, truth)
+            last_subset = subset
             if not stage_success:
                 eval_passed = False
                 break
@@ -157,8 +182,34 @@ def main():
         if eval_passed:
             print("Candidate passed all evaluation stages.")
 
+        # 4b. Baseline gate - clearing every stage's absolute threshold is
+        # not enough to merge; the final stage's score must also beat the
+        # best score ever actually merged for that stage. Without this, a
+        # candidate that regresses relative to what's already in place can
+        # still merge as long as it clears the (fixed) threshold.
+        baseline_score = baseline_store.get(last_subset) if last_subset is not None else 0.0
+        delta = final_score - baseline_score
+        below_baseline = False
+        if eval_passed and last_subset is not None:
+            if not baseline_store.passes(last_subset, final_score, min_improvement):
+                below_baseline = True
+                eval_passed = False
+                print(
+                    f"Candidate {candidate_id} scored {final_score:.4f} at {last_subset}%, which does not beat "
+                    f"baseline {baseline_score:.4f} + min_improvement {min_improvement}. Rejecting despite "
+                    f"clearing the absolute threshold."
+                )
+
+        metrics['baseline_score'] = baseline_score
+        metrics['delta'] = delta
+
         # 5. Analyze failure and log to Memory
-        category, error_text = analyze_failure(execution_result, eval_passed)
+        if below_baseline:
+            category, error_text = "below_baseline", (
+                f"score {final_score:.4f} did not beat baseline {baseline_score:.4f} + {min_improvement}"
+            )
+        else:
+            category, error_text = analyze_failure(execution_result, eval_passed)
 
         merged = False
         if not eval_passed:
@@ -192,6 +243,8 @@ def main():
                 )
                 vcs.merge(branch_name, worktree_path)
                 merged = True
+                if last_subset is not None:
+                    baseline_store.update_if_better(last_subset, final_score)
             else:
                 print(f"Candidate {candidate_id} was not merged (approval decision: {decision}). Rolling back.")
                 db.store_experiment(

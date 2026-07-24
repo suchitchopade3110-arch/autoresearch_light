@@ -18,14 +18,18 @@ class SandboxExecutor:
     hardened micro-VM - it does NOT protect against a deliberate kernel
     exploit or container escape. Do not run untrusted malware here.
     """
-    def __init__(self, config: Dict[str, Any], dataset_path: Optional[str] = None):
+    def __init__(self, config: Dict[str, Any], dataset_dir: Optional[str] = None):
         self.timeout = config.get('timeout_seconds', 10)
         self.cpu_limit = config.get('cpu_limit', '1.0')
         self.memory_limit = config.get('memory_limit', '512m')
-        # Mounted read-only into every sandbox run if set, so callers (the
-        # sequential loop and the concurrent evolutionary scheduler alike)
-        # don't each need to know about dataset wiring individually.
-        self.dataset_path = os.path.abspath(dataset_path) if dataset_path else None
+        # train.jsonl/test.jsonl mounted read-only into every sandbox run if
+        # set, so callers (the sequential loop and the concurrent
+        # evolutionary scheduler alike) don't each need to know about
+        # dataset wiring individually. The held-out labels file living
+        # alongside them is NEVER mounted here - only the host-side eval
+        # pipeline reads it, so a candidate can never read its own answer
+        # key off disk. See eval/dataset.py and eval/pipeline.py.
+        self.dataset_dir = os.path.abspath(dataset_dir) if dataset_dir else None
         self._build_image()
 
     def _build_image(self):
@@ -35,7 +39,8 @@ class SandboxExecutor:
             capture_output=True
         )
 
-    def run_candidate(self, script_path: str, env_vars: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def run_candidate(self, script_path: str, env_vars: Optional[Dict[str, str]] = None,
+                       out_dir: Optional[str] = None) -> Dict[str, Any]:
         """Runs the given script inside the docker sandbox."""
         start_time = time.time()
         container_name = f"sandbox-{uuid.uuid4().hex[:8]}"
@@ -54,9 +59,19 @@ class SandboxExecutor:
         ]
 
         run_env = dict(env_vars or {})
-        if self.dataset_path:
-            cmd += ["-v", f"{self.dataset_path}:/app/data/dataset.jsonl:ro"]
-            run_env.setdefault("DATASET_PATH", "/app/data/dataset.jsonl")
+        if self.dataset_dir:
+            train_path = os.path.join(self.dataset_dir, "train.jsonl")
+            test_path = os.path.join(self.dataset_dir, "test.jsonl")
+            cmd += ["-v", f"{train_path}:/app/data/train.jsonl:ro"]
+            cmd += ["-v", f"{test_path}:/app/data/test.jsonl:ro"]
+            run_env.setdefault("TRAIN_PATH", "/app/data/train.jsonl")
+            run_env.setdefault("TEST_PATH", "/app/data/test.jsonl")
+
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            # A read-write bind mount coexists fine with --read-only on the
+            # root filesystem - only this path is writable.
+            cmd += ["-v", f"{os.path.abspath(out_dir)}:/app/out:rw"]
 
         for key, value in run_env.items():
             cmd += ["-e", f"{key}={value}"]

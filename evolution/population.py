@@ -11,7 +11,7 @@ from evolution.scoring import score_candidates
 from evolution.reporting import log_generation_report
 
 class EvolutionEngine:
-    def __init__(self, config: Dict[str, Any], git_controller, sandbox, evaluator, metrics_calculator, failure_analyzer, patch_generator: PatchGenerator, prompt_builder: PromptBuilder, db: ExperimentDB, approval_store=None):
+    def __init__(self, config: Dict[str, Any], git_controller, sandbox, evaluator, metrics_calculator, failure_analyzer, patch_generator: PatchGenerator, prompt_builder: PromptBuilder, db: ExperimentDB, approval_store=None, truth=None, baseline_store=None):
         self.config = config.get('evolution', {})
         self.full_config = config
         self.eval_config = config.get('eval', {})
@@ -24,6 +24,8 @@ class EvolutionEngine:
         self.prompt_builder = prompt_builder
         self.db = db
         self.approval_store = approval_store
+        self.truth = truth or {}
+        self.baseline_store = baseline_store
 
         self.pop_size = self.config.get('population_size', 5)
         self.max_gens = self.config.get('max_generations', 3)
@@ -121,6 +123,8 @@ class EvolutionEngine:
                 self.failure_analyzer,
                 approval_store=self.approval_store,
                 approval_config=self.full_config,
+                truth=self.truth,
+                baseline_store=self.baseline_store,
             )
 
             scored = score_candidates(evaluated, self.config)

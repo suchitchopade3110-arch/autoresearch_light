@@ -26,13 +26,16 @@ class ConcurrentScheduler:
                           metrics_calculator,
                           failure_analyzer,
                           approval_store: Optional[ApprovalStore] = None,
-                          approval_config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                          approval_config: Optional[Dict[str, Any]] = None,
+                          truth: Optional[Dict[str, int]] = None,
+                          baseline_store=None) -> List[Dict[str, Any]]:
         results = []
         # Fail safe: if the caller didn't wire a store, still gate merges
         # rather than silently skipping approval - only an explicit, valid
         # approval.enabled: false in approval_config actually disables it.
         store = approval_store or ApprovalStore()
         gate_config = approval_config or {}
+        truth = truth or {}
 
         def process_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
             c_id = candidate['id']
@@ -57,24 +60,29 @@ class ConcurrentScheduler:
 
                 git_controller.commit_patch(worktree_path, f"Add candidate {c_id}")
 
+                out_dir = os.path.join(worktree_path, ".eval_out")
+                pred_path = os.path.join(out_dir, "predictions.jsonl")
+
                 final_score = 0.0
                 all_metrics = {}
                 eval_passed = True
                 failure_category = "success"
                 error_msg = ""
                 total_execution_time = 0.0
+                last_subset = None
 
                 for stage in eval_stages:
                     subset = stage['subset_percentage']
                     threshold = stage['threshold']
 
                     env = {"SUBSET_PERCENTAGE": str(subset)}
-                    exec_result = sandbox.run_candidate(script_path, env_vars=env)
+                    exec_result = sandbox.run_candidate(script_path, env_vars=env, out_dir=out_dir)
                     total_execution_time += exec_result.get('execution_time', 0.0)
 
                     exec_result['execution_time'] = total_execution_time
 
-                    stage_success, stage_score = evaluator.evaluate_stage(exec_result, subset, threshold)
+                    stage_success, stage_score = evaluator.evaluate_stage(exec_result, subset, threshold, pred_path, truth)
+                    last_subset = subset
 
                     if not stage_success:
                         eval_passed = False
@@ -87,6 +95,23 @@ class ConcurrentScheduler:
 
                     final_score = stage_score
                     all_metrics = metrics_calculator(exec_result)
+
+                # Baseline gate - see orchestrator/run.py for the rationale:
+                # clearing every stage's absolute threshold isn't enough: the
+                # final stage's score must also beat the best score ever
+                # actually merged for that stage.
+                baseline_score = baseline_store.get(last_subset) if (baseline_store and last_subset is not None) else 0.0
+                delta = final_score - baseline_score
+                if eval_passed and baseline_store and last_subset is not None:
+                    eval_section = gate_config.get('eval')
+                    min_improvement = eval_section.get('min_improvement', 0.001) if isinstance(eval_section, dict) else 0.001
+                    if not baseline_store.passes(last_subset, final_score, min_improvement):
+                        eval_passed = False
+                        failure_category = "below_baseline"
+                        error_msg = f"score {final_score:.4f} did not beat baseline {baseline_score:.4f} + {min_improvement}"
+
+                all_metrics['baseline_score'] = baseline_score
+                all_metrics['delta'] = delta
 
                 merged = False
                 approval_decision = None
@@ -102,6 +127,8 @@ class ConcurrentScheduler:
                     if eval_passed and approval_decision in ("approved", "skipped"):
                         git_controller.merge(branch_name, worktree_path)
                         merged = True
+                        if baseline_store and last_subset is not None:
+                            baseline_store.update_if_better(last_subset, final_score)
                     else:
                         git_controller.rollback(branch_name, worktree_path)
                         if eval_passed:
