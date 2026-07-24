@@ -135,6 +135,24 @@ def test_sandbox_out_dir_is_writable_and_survives_the_container(sandbox):
         finally:
             os.remove(script_path)
 
+def test_sandbox_has_ml_libraries(sandbox):
+    """Wave 2 acceptance: a candidate whose premise is ML research needs more than pure stdlib."""
+    script_content = (
+        "import numpy, pandas, sklearn\n"
+        "print('ML_LIBS_OK', numpy.__version__, pandas.__version__, sklearn.__version__)\n"
+    )
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(script_content)
+        script_path = f.name
+
+    try:
+        abs_path = os.path.abspath(script_path)
+        result = sandbox.run_candidate(abs_path)
+        assert result['exit_code'] == 0, result['stderr']
+        assert "ML_LIBS_OK" in result['stdout']
+    finally:
+        os.remove(script_path)
+
 def test_sandbox_has_no_network_access(sandbox):
     script_content = (
         "import socket\n"

@@ -8,6 +8,13 @@ FROM python:3.9-slim
 
 RUN useradd --create-home --uid 1000 sandboxuser
 WORKDIR /app
+
+# Installed before COPY so this layer caches across candidate script
+# changes - a candidate whose whole premise is ML research needs these to
+# do anything beyond pure stdlib.
+COPY requirements-sandbox.txt /app/requirements-sandbox.txt
+RUN pip install --no-cache-dir -r requirements-sandbox.txt
+
 COPY . /app
 RUN chown -R sandboxuser:sandboxuser /app
 USER sandboxuser

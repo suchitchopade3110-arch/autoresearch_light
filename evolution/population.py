@@ -1,7 +1,8 @@
+import os
 import uuid
 import json
 import random
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from generation.prompt_builder import PromptBuilder
 from generation.patch_generator import PatchGenerator, validate_and_apply_patch
 from memory.db import ExperimentDB
@@ -37,37 +38,69 @@ class EvolutionEngine:
 
         self.best_scores = []
         self.duplicate_avoidance_count = 0
+        self.duplicate_exhausted_count = 0
+        self.generation_failed_count = 0
 
-    def _generate_candidate(self, goal: str, mutation_context: str = "") -> Dict[str, Any]:
+    def _generate_candidate(self, goal: str, mutation_context: str = "") -> Optional[Dict[str, Any]]:
+        """
+        Creates the candidate's worktree FIRST, so the diff is generated
+        and dry-run-checked against the file content that will actually
+        receive the real apply later - checking against any other
+        directory's state (the old behaviour) is meaningless once every
+        candidate has its own worktree with its own current file content.
+
+        Returns None if no usable diff was found after max_retries -
+        callers must not substitute a scoreless fallback diff in that
+        case (it would burn a full sandbox x stages budget on something
+        that cannot score); the worktree is rolled back before returning.
+        """
+        candidate_id = uuid.uuid4().hex[:8]
+        branch_name, worktree_path = self.git_controller.create_branch(candidate_id)
+        script_path = os.path.join(worktree_path, "candidate_script.py")
+        if not os.path.exists(script_path):
+            with open(script_path, "w") as f:
+                f.write("\n")
+        with open(script_path) as f:
+            current_content = f.read()
+
         max_retries = 3
+        last_rejection = "malformed"
         for _ in range(max_retries):
             prompt = self.prompt_builder.build_prompt(goal)
             if mutation_context:
                 prompt += f"\nMutation Instruction: {mutation_context}"
 
-            diff = self.patch_generator.llm_client.generate_diff(prompt, "candidate_script.py")
+            diff = self.patch_generator.llm_client.generate_diff(prompt, "candidate_script.py", current_content)
+            # Captured immediately, not read later from the shared
+            # llm_client - candidates are generated in a batch before any
+            # scheduling happens, so by schedule time last_usage would only
+            # reflect whichever candidate was generated most recently.
+            generation_usage = getattr(self.patch_generator.llm_client, "last_usage", {}) or {}
 
-            # dry_run: only check applicability here, don't mutate the
-            # shared checkout - the scheduler applies it for real, once,
-            # inside the candidate's own worktree.
-            if not validate_and_apply_patch(diff, dry_run=True):
+            if not validate_and_apply_patch(diff, cwd=worktree_path, dry_run=True):
+                last_rejection = "malformed"
                 continue
 
             dup_threshold = self.config.get('duplicate_threshold', 0.25)
             if not is_duplicate(diff, self.db, dup_threshold, hypothesis=goal):
                 return {
-                    'id': uuid.uuid4().hex[:8],
+                    'id': candidate_id,
                     'diff': diff,
-                    'goal': goal
+                    'goal': goal,
+                    'generation_usage': generation_usage,
+                    'branch_name': branch_name,
+                    'worktree_path': worktree_path,
                 }
             else:
                 self.duplicate_avoidance_count += 1
+                last_rejection = "duplicate"
 
-        return {
-            'id': uuid.uuid4().hex[:8],
-            'diff': f"--- a/candidate_script.py\n+++ b/candidate_script.py\n@@ -1 +1 @@\n-\n+print('Fallback {uuid.uuid4().hex[:4]}')\n",
-            'goal': goal
-        }
+        self.git_controller.rollback(branch_name, worktree_path)
+        if last_rejection == "duplicate":
+            self.duplicate_exhausted_count += 1
+        else:
+            self.generation_failed_count += 1
+        return None
 
     def _select_parents(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         strategy = self.config.get('selection_strategy', 'tournament')
@@ -105,12 +138,45 @@ class EvolutionEngine:
                 self.pop_size = min(sizing.get('max_population', 10), self.pop_size + 1)
         return False
 
+    def _record_exhausted_slot(self, goal: str, rejection: str) -> None:
+        outcome = "duplicate_exhausted" if rejection == "duplicate" else "failure"
+        self.db.store_experiment(
+            hypothesis=goal,
+            diff="",
+            rationale="Candidate generation exhausted retries",
+            metrics={},
+            outcome=outcome,
+            failure_reason=f"exhausted {rejection} retries with no usable diff",
+        )
+
+    def _generate_population(self, goal: str, n: int, mutation_source: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        generation = []
+        for _ in range(n):
+            if mutation_source:
+                parent = self.rng.choice(mutation_source)
+                mutation_context = f"Vary the approach used in diff:\n{parent['diff']}"
+            else:
+                mutation_context = ""
+
+            before_dup = self.duplicate_exhausted_count
+            before_fail = self.generation_failed_count
+            candidate = self._generate_candidate(goal, mutation_context)
+            if candidate is not None:
+                generation.append(candidate)
+            elif self.duplicate_exhausted_count > before_dup:
+                self._record_exhausted_slot(goal, "duplicate")
+            elif self.generation_failed_count > before_fail:
+                self._record_exhausted_slot(goal, "malformed")
+        return generation
+
     def run(self, goal: str):
         print(f"Initializing Population of {self.pop_size}...")
-        current_generation = [self._generate_candidate(goal) for _ in range(self.pop_size)]
+        current_generation = self._generate_population(goal, self.pop_size)
 
         for gen in range(self.max_gens):
             self.duplicate_avoidance_count = 0
+            self.duplicate_exhausted_count = 0
+            self.generation_failed_count = 0
             print(f"\n=== Running Generation {gen + 1}/{self.max_gens} ===")
 
             evaluated = self.scheduler.execute_generation(
@@ -162,7 +228,8 @@ class EvolutionEngine:
                 worst_score=worst_score,
                 compute_time_spent=total_time,
                 convergence_signal=convergence_signal,
-                duplicate_avoidance_count=self.duplicate_avoidance_count
+                duplicate_avoidance_count=self.duplicate_avoidance_count,
+                duplicate_exhausted_count=self.duplicate_exhausted_count,
             )
 
             if gen == self.max_gens - 1:
@@ -173,13 +240,19 @@ class EvolutionEngine:
             next_generation = []
 
             if parents:
-                elite = dict(parents[0])
-                elite['id'] = uuid.uuid4().hex[:8]
-                next_generation.append(elite)
+                # Explicit reconstruction, not dict(parents[0]) - the parent's
+                # branch_name/worktree_path were already merged or rolled
+                # back by the scheduler, so this elite copy (a new id) must
+                # get a fresh worktree from _generate_candidate's sibling
+                # path, not try to reuse a worktree that no longer exists.
+                next_generation.append({
+                    'id': uuid.uuid4().hex[:8],
+                    'diff': parents[0]['diff'],
+                    'goal': parents[0]['goal'],
+                })
 
-            while len(next_generation) < self.pop_size:
-                parent = self.rng.choice(parents) if parents else None
-                mutation_context = f"Vary the approach used in diff:\n{parent['diff']}" if parent else ""
-                next_generation.append(self._generate_candidate(goal, mutation_context))
+            next_generation.extend(
+                self._generate_population(goal, self.pop_size - len(next_generation), mutation_source=parents)
+            )
 
             current_generation = next_generation

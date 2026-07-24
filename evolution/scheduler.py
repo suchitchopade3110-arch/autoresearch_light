@@ -42,12 +42,19 @@ class ConcurrentScheduler:
             diff = candidate['diff']
             goal = candidate.get('goal', 'Optimization goal')
 
-            branch_name = None
-            worktree_path = None
+            branch_name = candidate.get('branch_name')
+            worktree_path = candidate.get('worktree_path')
 
             try:
-                with self.git_lock:
-                    branch_name, worktree_path = git_controller.create_branch(c_id)
+                if not worktree_path:
+                    # No pre-created worktree (e.g. an elite carryover) -
+                    # create one now, same as before candidates got their
+                    # own worktree at generation time.
+                    with self.git_lock:
+                        branch_name, worktree_path = git_controller.create_branch(c_id)
+                # else: the worktree was already created (and the diff's
+                # dry-run already checked) at generation time, against this
+                # exact current file content - see evolution/population.py.
 
                 script_path = os.path.join(worktree_path, "candidate_script.py")
                 if not os.path.exists(script_path):
@@ -112,6 +119,11 @@ class ConcurrentScheduler:
 
                 all_metrics['baseline_score'] = baseline_score
                 all_metrics['delta'] = delta
+                generation_usage = candidate.get('generation_usage') or {}
+                if generation_usage:
+                    all_metrics['generation_input_tokens'] = generation_usage.get('input_tokens', 0)
+                    all_metrics['generation_output_tokens'] = generation_usage.get('output_tokens', 0)
+                    all_metrics['generation_cost_usd'] = generation_usage.get('estimated_cost_usd', 0.0)
 
                 merged = False
                 approval_decision = None

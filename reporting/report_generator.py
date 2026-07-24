@@ -58,6 +58,12 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
         total_compute_seconds / success_count if success_count else None
     )
 
+    # Only populated by AnthropicClient (see generation/patch_generator.py) -
+    # MockLLMClient makes no API calls, so this is 0.0 for every mock run.
+    total_generation_cost_usd = sum(e["metrics"].get("generation_cost_usd", 0.0) for e in experiments)
+    total_generation_input_tokens = sum(e["metrics"].get("generation_input_tokens", 0) for e in experiments)
+    total_generation_output_tokens = sum(e["metrics"].get("generation_output_tokens", 0) for e in experiments)
+
     approvals = approval_store.list_all() if approval_store else []
     approved = sum(1 for a in approvals if a["status"] == "approved")
     rejected = sum(1 for a in approvals if a["status"] == "rejected")
@@ -78,6 +84,9 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
         "candidates_scheduled": candidates_scheduled,
         "total_compute_seconds": total_compute_seconds,
         "compute_cost_per_improvement_seconds": compute_cost_per_improvement_seconds,
+        "total_generation_cost_usd": total_generation_cost_usd,
+        "total_generation_input_tokens": total_generation_input_tokens,
+        "total_generation_output_tokens": total_generation_output_tokens,
         "approvals": {
             "pending": pending,
             "approved": approved,
@@ -111,6 +120,7 @@ Generated: {kpis['generated_at']}
 - **Duplicate avoidance rate: {kpis['duplicate_avoidance_rate']:.1%}**
 - Total compute time: {kpis['total_compute_seconds']:.2f}s
 - **Compute cost per improvement: {cost_line}**
+- LLM generation cost: ${kpis['total_generation_cost_usd']:.4f} ({kpis['total_generation_input_tokens']} in / {kpis['total_generation_output_tokens']} out tokens) - 0 for mock runs
 
 ## Human approval gate
 - Pending: {kpis['approvals']['pending']}

@@ -44,6 +44,12 @@ generation:
   max_retrieved_failures: 2
   max_retrieved_successes: 2
   prompt_char_budget: 4000
+  # "mock" (default) needs no network or API key - MockLLMClient always
+  # implements the same honest baseline solution. "anthropic" calls the
+  # real Claude API (ANTHROPIC_API_KEY from the environment, never from
+  # this file) - see generation/patch_generator.py:AnthropicClient.
+  client: mock
+  # model: claude-sonnet-5
 
 # Human-approval gate on merges. enabled defaults to true even if this whole
 # section is removed or malformed - see approval/gate.py:resolve_approval_config.
