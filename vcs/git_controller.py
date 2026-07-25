@@ -1,8 +1,22 @@
 import os
 import uuid
-from typing import Tuple
+from typing import Dict, Tuple
 
 import git
+
+
+class MergeConflict(Exception):
+    """
+    Raised when a candidate branch can't be rebased cleanly onto the
+    target branch. The rebase is aborted before this is raised, so the
+    candidate's worktree is left clean (not mid-rebase) and its branch
+    untouched - the caller is expected to roll it back, same as any other
+    failure outcome.
+    """
+    def __init__(self, branch_name: str, message: str):
+        super().__init__(f"Candidate branch {branch_name} could not be rebased cleanly: {message}")
+        self.branch_name = branch_name
+        self.message = message
 
 
 class GitController:
@@ -13,10 +27,24 @@ class GitController:
     and each worktree is independent enough that concurrent candidates (see
     evolution/scheduler.py) don't need to share a checkout at all.
     """
-    def __init__(self, repo_path: str = ".", worktree_root: str = None):
+    def __init__(self, repo_path: str = ".", worktree_root: str = None, base_ref: str = None):
         self.repo = git.Repo(repo_path)
         self.repo_path = os.path.abspath(repo_path)
-        self.original_branch = self.repo.active_branch.name
+
+        if base_ref:
+            self.original_branch = base_ref
+            self._tracks_named_branch = base_ref in [h.name for h in self.repo.heads]
+        else:
+            try:
+                self.original_branch = self.repo.active_branch.name
+                self._tracks_named_branch = True
+            except TypeError:
+                # Detached HEAD (e.g. a CI checkout of a specific commit):
+                # there is no branch name to read or to rebase/merge onto,
+                # so pin to the current commit instead of crashing here.
+                self.original_branch = self.repo.head.commit.hexsha
+                self._tracks_named_branch = False
+
         self.worktree_root = worktree_root or os.path.join(self.repo_path, ".candidate_worktrees")
         os.makedirs(self.worktree_root, exist_ok=True)
 
@@ -51,10 +79,92 @@ class GitController:
             self.repo.git.worktree("remove", "--force", worktree_path)
         self.repo.delete_head(branch_name, force=True)
 
+    def cleanup_orphans(self) -> Dict[str, int]:
+        """
+        Removes every candidate worktree and branch left behind by a
+        previous run that crashed (or was killed) before it could roll
+        back or merge them. Safe to call unconditionally at startup: a
+        freshly-started process never has any candidates of its own yet,
+        so anything matching "candidate-*" under worktree_root, or a
+        "candidate-*" branch, is necessarily orphaned leftovers.
+
+        Never touches original_branch or anything outside worktree_root.
+        """
+        removed_worktrees = 0
+
+        try:
+            listing = self.repo.git.worktree("list", "--porcelain")
+        except git.GitCommandError:
+            listing = ""
+
+        worktree_root_abs = os.path.abspath(self.worktree_root)
+        for line in listing.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            path = line[len("worktree "):]
+            path_abs = os.path.abspath(path)
+            if path_abs == self.repo_path:
+                continue  # the main worktree itself - never remove it
+            try:
+                is_under_root = os.path.commonpath([path_abs, worktree_root_abs]) == worktree_root_abs
+            except ValueError:
+                is_under_root = False  # e.g. different drives on Windows
+            if is_under_root:
+                self.repo.git.worktree("remove", "--force", path)
+                removed_worktrees += 1
+
+        # Drops stale administrative files for worktrees whose directory was
+        # already deleted from disk (e.g. a crash mid-removal), which the
+        # loop above can't see since `worktree list` no longer reports them
+        # as removable paths.
+        self.repo.git.worktree("prune")
+
+        removed_branches = 0
+        for head in list(self.repo.heads):
+            if head.name.startswith("candidate-") and head.name != self.original_branch:
+                self.repo.delete_head(head.name, force=True)
+                removed_branches += 1
+
+        return {"removed_worktrees": removed_worktrees, "removed_branches": removed_branches}
+
     def merge(self, branch_name: str, worktree_path: str) -> None:
-        """Merges the candidate branch into the original branch and cleans up its worktree."""
-        if os.path.exists(worktree_path):
-            self.repo.git.worktree("remove", "--force", worktree_path)
-        self.repo.heads[self.original_branch].checkout()
-        self.repo.git.merge(branch_name)
+        """
+        Rebases the candidate branch onto the target branch inside its own
+        worktree first, then fast-forwards the target branch onto it - a
+        fast-forward can never conflict after a clean rebase, so the
+        shared main checkout can never be left in a half-merged state
+        (no MERGE_HEAD, no conflict markers, repo.is_dirty() stays False).
+
+        Raises MergeConflict if the rebase itself conflicts, leaving the
+        candidate's worktree and branch in place for the caller to roll
+        back - exactly like any other failure outcome. This is routine
+        traffic in evolutionary mode, where several candidates rebase onto
+        the same base per generation, not an edge case.
+        """
+        wt = git.Repo(worktree_path)
+        try:
+            wt.git.rebase(self.original_branch)
+        except git.GitCommandError as e:
+            try:
+                wt.git.rebase("--abort")
+            except git.GitCommandError:
+                pass
+            raise MergeConflict(branch_name, str(e))
+        finally:
+            wt.close()
+
+        # git.checkout (not repo.heads[...].checkout()) works whether
+        # original_branch is a branch name or a pinned commit sha
+        # (detached HEAD case).
+        self.repo.git.checkout(self.original_branch)
+        self.repo.git.merge(branch_name, "--ff-only")
+
+        if not self._tracks_named_branch:
+            # A detached HEAD has no branch to auto-advance to the new tip.
+            # Without this, the next candidate would rebase onto this
+            # now-stale commit, and its own ff-only merge could silently
+            # discard this one instead of building on it.
+            self.original_branch = self.repo.head.commit.hexsha
+
+        self.repo.git.worktree("remove", "--force", worktree_path)
         self.repo.delete_head(branch_name, force=True)

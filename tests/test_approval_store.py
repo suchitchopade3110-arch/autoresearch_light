@@ -1,5 +1,7 @@
 import os
+import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 from approval.store import ApprovalStore
 
@@ -54,6 +56,53 @@ def test_decide_is_a_noop_once_already_decided():
         assert first is True
         assert second is False
         assert store.get_request(request_id)["status"] == "timed_out"
+
+
+def test_timeout_stale_requests_times_out_only_requests_older_than_the_window():
+    """
+    Wave 3 acceptance: crash recovery must reclaim a request left 'pending'
+    forever because the process awaiting it crashed before its own deadline
+    check ever fired - but must never touch a request still within its
+    timeout window.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        store = ApprovalStore(os.path.join(d, "approvals.db"))
+        stale_id = store.create_request("cand-stale", "goal", "diff", 0.9, {})
+        fresh_id = store.create_request("cand-fresh", "goal", "diff", 0.9, {})
+
+        # Backdate the stale request's created_at directly - simulates a
+        # request that has genuinely been sitting pending past the timeout.
+        old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=10000)).isoformat()
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                "UPDATE approval_requests SET created_at = ? WHERE id = ?", (old_created_at, stale_id)
+            )
+            conn.commit()
+
+        timed_out_count = store.timeout_stale_requests(timeout_seconds=1800)
+
+        assert timed_out_count == 1
+        assert store.get_request(stale_id)["status"] == "timed_out"
+        assert store.get_request(fresh_id)["status"] == "pending"
+
+
+def test_timeout_stale_requests_never_overrides_an_already_decided_request():
+    with tempfile.TemporaryDirectory() as d:
+        store = ApprovalStore(os.path.join(d, "approvals.db"))
+        request_id = store.create_request("cand-1", "goal", "diff", 0.9, {})
+        store.decide(request_id, "approved")
+
+        old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=10000)).isoformat()
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                "UPDATE approval_requests SET created_at = ? WHERE id = ?", (old_created_at, request_id)
+            )
+            conn.commit()
+
+        timed_out_count = store.timeout_stale_requests(timeout_seconds=1800)
+
+        assert timed_out_count == 0
+        assert store.get_request(request_id)["status"] == "approved"
 
 
 def test_decide_rejects_invalid_status():

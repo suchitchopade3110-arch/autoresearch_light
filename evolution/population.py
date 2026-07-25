@@ -10,9 +10,10 @@ from evolution.duplicate_checker import is_duplicate
 from evolution.scheduler import ConcurrentScheduler
 from evolution.scoring import score_candidates
 from evolution.reporting import log_generation_report
+from observability.logging_config import bind, get_logger
 
 class EvolutionEngine:
-    def __init__(self, config: Dict[str, Any], git_controller, sandbox, evaluator, metrics_calculator, failure_analyzer, patch_generator: PatchGenerator, prompt_builder: PromptBuilder, db: ExperimentDB, approval_store=None, truth=None, baseline_store=None):
+    def __init__(self, config: Dict[str, Any], git_controller, sandbox, evaluator, metrics_calculator, failure_analyzer, patch_generator: PatchGenerator, prompt_builder: PromptBuilder, db: ExperimentDB, approval_store=None, truth=None, baseline_store=None, run_id=None):
         self.config = config.get('evolution', {})
         self.full_config = config
         self.eval_config = config.get('eval', {})
@@ -27,10 +28,12 @@ class EvolutionEngine:
         self.approval_store = approval_store
         self.truth = truth or {}
         self.baseline_store = baseline_store
+        self.run_id = run_id or uuid.uuid4().hex[:12]
+        self.logger = get_logger(__name__, run_id=self.run_id)
 
         self.pop_size = self.config.get('population_size', 5)
         self.max_gens = self.config.get('max_generations', 3)
-        self.scheduler = ConcurrentScheduler(self.config.get('max_concurrent_sandboxes', 3))
+        self.scheduler = ConcurrentScheduler(self.config.get('max_concurrent_sandboxes', 3), logger=self.logger)
         # a dedicated instance, not the global random module, so selection is
         # reproducible given the same seed without affecting anything else
         # that happens to use `random` in-process.
@@ -55,6 +58,7 @@ class EvolutionEngine:
         that cannot score); the worktree is rolled back before returning.
         """
         candidate_id = uuid.uuid4().hex[:8]
+        candidate_logger = bind(self.logger, candidate_id=candidate_id)
         branch_name, worktree_path = self.git_controller.create_branch(candidate_id)
         script_path = os.path.join(worktree_path, "candidate_script.py")
         if not os.path.exists(script_path):
@@ -77,7 +81,7 @@ class EvolutionEngine:
             # reflect whichever candidate was generated most recently.
             generation_usage = getattr(self.patch_generator.llm_client, "last_usage", {}) or {}
 
-            if not validate_and_apply_patch(diff, cwd=worktree_path, dry_run=True):
+            if not validate_and_apply_patch(diff, cwd=worktree_path, dry_run=True, logger=candidate_logger):
                 last_rejection = "malformed"
                 continue
 
@@ -170,14 +174,14 @@ class EvolutionEngine:
         return generation
 
     def run(self, goal: str):
-        print(f"Initializing Population of {self.pop_size}...")
+        self.logger.info(f"Initializing Population of {self.pop_size}...")
         current_generation = self._generate_population(goal, self.pop_size)
 
         for gen in range(self.max_gens):
             self.duplicate_avoidance_count = 0
             self.duplicate_exhausted_count = 0
             self.generation_failed_count = 0
-            print(f"\n=== Running Generation {gen + 1}/{self.max_gens} ===")
+            self.logger.info(f"\n=== Running Generation {gen + 1}/{self.max_gens} ===")
 
             evaluated = self.scheduler.execute_generation(
                 current_generation,
@@ -198,6 +202,8 @@ class EvolutionEngine:
             for c in scored:
                 if c['success']:
                     outcome = "success"
+                elif c.get('failure_category') == 'conflict':
+                    outcome = "conflict"  # rebase-onto-base failed - real signal about population staleness, not a code failure
                 elif c.get('eval_passed'):
                     outcome = "held"  # passed evaluation but not approved for merge
                 else:
@@ -230,6 +236,7 @@ class EvolutionEngine:
                 convergence_signal=convergence_signal,
                 duplicate_avoidance_count=self.duplicate_avoidance_count,
                 duplicate_exhausted_count=self.duplicate_exhausted_count,
+                logger=self.logger,
             )
 
             if gen == self.max_gens - 1:

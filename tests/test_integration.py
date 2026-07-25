@@ -8,8 +8,10 @@ def test_full_loop_execution():
     # Create a temporary directory to act as the repository
     with tempfile.TemporaryDirectory() as temp_repo:
         # Copy the project files to the temp directory
-        for item in ["configs", "orchestrator", "eval", "sandbox", "vcs", "memory", "generation", "approval", "reporting"]:
+        for item in ["configs", "orchestrator", "eval", "sandbox", "vcs", "memory", "generation", "approval",
+                     "reporting", "observability"]:
             shutil.copytree(item, os.path.join(temp_repo, item))
+        shutil.copy("config_schema.py", os.path.join(temp_repo, "config_schema.py"))
 
         # create gitignore
         with open(os.path.join(temp_repo, ".gitignore"), "w") as f:

@@ -1,3 +1,14 @@
+# The repository candidates are generated into and evaluated against.
+# repo_path defaults to "." (the harness's own repo) for backward
+# compatibility, but that mixes the harness's own history with candidate
+# branches - point it at a separate checkout to keep them independent.
+# base_ref pins the commit/branch candidates are based on and merged back
+# onto; leave unset to use repo_path's current branch (or, if repo_path is
+# in a detached HEAD state, its current commit).
+target:
+  repo_path: "."
+  # base_ref: main
+
 sandbox:
   timeout_seconds: 5
   cpu_limit: "0.5"

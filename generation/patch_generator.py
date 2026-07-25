@@ -4,6 +4,10 @@ import subprocess
 import tempfile
 from typing import Optional, Tuple
 
+from observability.logging_config import get_logger
+
+_module_logger = get_logger(__name__)
+
 class LLMClient(ABC):
     @abstractmethod
     def generate_diff(self, prompt: str, target_file: str, current_content: str) -> str:
@@ -221,7 +225,7 @@ class AnthropicClient(LLMClient):
         }
         return diff
 
-def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_run: bool = False) -> bool:
+def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_run: bool = False, logger=None) -> bool:
     """
     Validates a patch by attempting to apply it cleanly, then applies it
     unless `dry_run` is set. `cwd` is the git working tree the patch should
@@ -252,7 +256,7 @@ def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_r
             subprocess.run(["git", "apply", patch_file], check=True, capture_output=True, cwd=cwd)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Patch validation/application failed: {e.stderr}")
+        (logger or _module_logger).warning(f"Patch validation/application failed: {e.stderr}")
         return False
     finally:
         if os.path.exists(patch_file):
@@ -262,11 +266,12 @@ class PatchGenerator:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
 
-    def generate_and_apply(self, prompt: str, target_file: str, cwd: Optional[str] = None) -> bool:
+    def generate_and_apply(self, prompt: str, target_file: str, cwd: Optional[str] = None, logger=None) -> bool:
         """
         Generates a patch and attempts to apply it in `cwd` (a candidate's
         own worktree). Returns (success, diff).
         """
+        log = logger or _module_logger
         file_path = os.path.join(cwd, target_file) if cwd else target_file
         try:
             with open(file_path) as f:
@@ -276,7 +281,6 @@ class PatchGenerator:
 
         diff = self.llm_client.generate_diff(prompt, target_file, current_content)
 
-        print("Generated diff:")
-        print(diff)
+        log.info(f"Generated diff:\n{diff}")
 
-        return validate_and_apply_patch(diff, cwd=cwd), diff
+        return validate_and_apply_patch(diff, cwd=cwd, logger=log), diff
