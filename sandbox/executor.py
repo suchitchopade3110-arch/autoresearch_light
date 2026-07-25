@@ -22,6 +22,16 @@ class SandboxExecutor:
         self.timeout = config.get('timeout_seconds', 10)
         self.cpu_limit = config.get('cpu_limit', '1.0')
         self.memory_limit = config.get('memory_limit', '512m')
+        # pids_limit caps how many processes/threads a candidate can fork -
+        # without it, a fork bomb can exhaust the host's PID table even
+        # though CPU/memory are capped, since neither limit bounds process
+        # *count*. ulimit_nofile caps open file descriptors per-process for
+        # the same reason (a descriptor-exhaustion loop isn't CPU/memory-
+        # bound either). tmpfs_size_mb bounds the writable /tmp mount so it
+        # can't be filled up to exhaust host RAM (tmpfs is backed by RAM).
+        self.pids_limit = config.get('pids_limit', 128)
+        self.ulimit_nofile = config.get('ulimit_nofile', 1024)
+        self.tmpfs_size_mb = config.get('tmpfs_size_mb', 64)
         # train.jsonl/test.jsonl mounted read-only into every sandbox run if
         # set, so callers (the sequential loop and the concurrent
         # evolutionary scheduler alike) don't each need to know about
@@ -50,9 +60,11 @@ class SandboxExecutor:
             f"--name={container_name}",
             f"--cpus={self.cpu_limit}",
             f"--memory={self.memory_limit}",
+            f"--pids-limit={self.pids_limit}",
+            "--ulimit", f"nofile={self.ulimit_nofile}",
             "--network", "none",
             "--read-only",
-            "--tmpfs", "/tmp",
+            "--tmpfs", f"/tmp:size={self.tmpfs_size_mb}m",
             "--security-opt", "no-new-privileges",
             "--cap-drop", "ALL",
             "-v", f"{script_path}:/app/candidate_script.py:ro",

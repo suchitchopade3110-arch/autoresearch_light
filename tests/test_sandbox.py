@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
+
 import pytest
 from sandbox.executor import SandboxExecutor
 
@@ -172,3 +174,34 @@ def test_sandbox_has_no_network_access(sandbox):
         assert "NO_NETWORK" in result['stdout']
     finally:
         os.remove(script_path)
+
+
+def test_docker_run_command_includes_resource_hardening_flags():
+    """
+    Wave 4 acceptance: CPU/memory limits alone don't bound process count or
+    open file descriptors (a fork bomb or fd-exhaustion loop isn't CPU/
+    memory-bound), and an unbounded /tmp tmpfs can exhaust host RAM since
+    tmpfs is RAM-backed. Doesn't need a real docker daemon - mocks
+    subprocess.run and inspects the constructed command directly.
+    """
+    with patch("sandbox.executor.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        config = {
+            'timeout_seconds': 10,
+            'cpu_limit': "0.5",
+            'memory_limit': "256m",
+            'pids_limit': 64,
+            'ulimit_nofile': 512,
+            'tmpfs_size_mb': 32,
+        }
+        executor = SandboxExecutor(config)
+        executor.run_candidate("/tmp/does-not-need-to-exist.py")
+
+        run_call = next(c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "run"])
+        cmd = run_call.args[0]
+
+        assert "--pids-limit=64" in cmd
+        assert "--ulimit" in cmd
+        assert "nofile=512" in cmd
+        assert "--tmpfs" in cmd
+        assert "/tmp:size=32m" in cmd

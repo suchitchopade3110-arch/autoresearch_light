@@ -4,6 +4,16 @@ def is_duplicate(diff: str, db: ExperimentDB, threshold: float = 0.25, hypothesi
     if not diff or diff.strip() == "":
         return False
 
+    # Cheap exact-match check first - has_exact_diff is a metadata filter
+    # (no embedding function invoked), unlike the nearest-neighbor search
+    # below. Skips paying for an embedding + similarity search just to
+    # then find out the closest result is a byte-for-byte repeat. A diff
+    # that only differs from a stored one by leading/trailing whitespace
+    # still falls through to the slower path below, which already handles
+    # that case via a stripped string comparison.
+    if db.has_exact_diff(diff):
+        return True
+
     # Shape the query the same way store_experiment shapes its embedded
     # document (Hypothesis + Diff) - querying with the bare diff against a
     # document that also contains hypothesis/rationale/outcome text dilutes

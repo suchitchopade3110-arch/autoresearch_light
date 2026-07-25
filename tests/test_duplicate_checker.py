@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from evolution.duplicate_checker import is_duplicate
 from memory.db import ExperimentDB
 
@@ -40,6 +42,22 @@ def test_genuinely_different_diff_is_not_flagged(tmp_dir):
     db = ExperimentDB(db_path=tmp_dir)
     db.store_experiment(hypothesis="goal", diff=DIFF_A, rationale="r", metrics={}, outcome="success")
     assert is_duplicate(UNRELATED_DIFF, db, threshold=0.25, hypothesis="goal") is False
+
+
+def test_exact_duplicate_short_circuits_before_the_expensive_embedding_query(tmp_dir):
+    """
+    Wave 4 acceptance: an exact-diff repeat (e.g. MockLLMClient always
+    proposing the same diff) must be caught via a cheap metadata lookup
+    (ExperimentDB.has_exact_diff), not by paying for a full embedding +
+    nearest-neighbor search (collection.query) just to then string-compare
+    the closest result.
+    """
+    db = ExperimentDB(db_path=tmp_dir)
+    db.store_experiment(hypothesis="goal", diff=DIFF_A, rationale="r", metrics={}, outcome="success")
+
+    with patch.object(db.collection, "query", wraps=db.collection.query) as mock_query:
+        assert is_duplicate(DIFF_A, db, hypothesis="goal") is True
+        mock_query.assert_not_called()
 
 
 def test_retrieve_experiments_includes_distance(tmp_dir):

@@ -54,9 +54,11 @@
         </div>
         <div class="flex gap-2">
           <form method="post" action="/approvals/{{ req.id }}/approve">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="bg-emerald-600 text-white px-3 py-1 rounded text-sm hover:bg-emerald-700">Approve</button>
           </form>
           <form method="post" action="/approvals/{{ req.id }}/reject">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Reject</button>
           </form>
         </div>

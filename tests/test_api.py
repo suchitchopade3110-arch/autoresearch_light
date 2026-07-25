@@ -9,6 +9,9 @@ def client(tmp_dir):
     os.environ["CHROMA_DB_PATH"] = os.path.join(tmp_dir, "chroma")
     os.environ["APPROVAL_DB_PATH"] = os.path.join(tmp_dir, "approvals.db")
     os.environ["EVOLUTION_REPORT_PATH"] = os.path.join(tmp_dir, "evolution_report.jsonl")
+    # These tests are about dashboard/API data correctness, not security -
+    # see tests/test_api_security.py for auth/CSRF coverage.
+    os.environ["DASHBOARD_AUTH_DISABLED"] = "true"
 
     # api.main builds its db/store at import time from those env vars,
     # so force a fresh import per test rather than reusing a cached module.
@@ -19,6 +22,7 @@ def client(tmp_dir):
     from fastapi.testclient import TestClient
 
     yield TestClient(api_main.app), api_main.db, api_main.store
+    os.environ.pop("DASHBOARD_AUTH_DISABLED", None)
 
 
 def test_dashboard_renders_pending_and_history(client):
@@ -47,7 +51,12 @@ def test_approve_endpoint_persists_decision(client):
     test_client, db, store = client
     req_id = store.create_request("cand-1", "goal", "diff", 0.9, {})
 
-    r = test_client.post(f"/approvals/{req_id}/approve", data={"note": "ship it"}, follow_redirects=False)
+    # A valid CSRF token requires having visited the dashboard first - see
+    # tests/test_api_security.py for coverage of the CSRF check itself.
+    csrf_token = test_client.get("/").cookies.get("csrf_token")
+    r = test_client.post(
+        f"/approvals/{req_id}/approve", data={"note": "ship it", "csrf_token": csrf_token}, follow_redirects=False
+    )
     assert r.status_code == 303
 
     stored = store.get_request(req_id)
@@ -59,7 +68,8 @@ def test_reject_endpoint_persists_decision(client):
     test_client, db, store = client
     req_id = store.create_request("cand-1", "goal", "diff", 0.9, {})
 
-    test_client.post(f"/approvals/{req_id}/reject", follow_redirects=False)
+    csrf_token = test_client.get("/").cookies.get("csrf_token")
+    test_client.post(f"/approvals/{req_id}/reject", data={"csrf_token": csrf_token}, follow_redirects=False)
 
     stored = store.get_request(req_id)
     assert stored["status"] == "rejected"

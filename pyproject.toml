@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoresearch-lite"
+version = "0.1.0"
+description = "An autonomous ML research agent loop: propose, sandbox-evaluate, and merge or roll back candidate patches, with human approval and RAG-style memory."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "GitPython>=3.1",
+    "PyYAML>=6.0",
+    "pydantic>=2.0",
+    "chromadb>=0.4",
+    "fastapi>=0.108",
+    "uvicorn>=0.25",
+    "jinja2>=3.1",
+    "httpx>=0.25",
+    "python-multipart>=0.0.9",
+    "anthropic>=0.119",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+autoresearch = "orchestrator.run:main"
+
+[tool.setuptools]
+py-modules = ["config_schema"]
+
+[tool.setuptools.packages.find]
+include = [
+    "approval*",
+    "api*",
+    "eval*",
+    "evolution*",
+    "generation*",
+    "memory*",
+    "observability*",
+    "orchestrator*",
+    "reporting*",
+    "sandbox*",
+    "vcs*",
+]
