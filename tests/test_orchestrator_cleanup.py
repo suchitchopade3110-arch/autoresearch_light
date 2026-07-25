@@ -17,13 +17,23 @@ def test_sigterm_after_install_signal_handlers_exits_cleanly_instead_of_a_traceb
     process) must exit promptly with a clear message, not propagate as an
     unhandled signal/traceback - any in-progress candidate is reclaimed by
     the next run's startup cleanup, not by this handler.
+
+    Invokes the installed handler directly rather than actually raising the
+    OS signal (e.g. via os.kill) - signal delivery semantics differ across
+    platforms, and on Windows, os.kill(pid, SIGTERM) against the current
+    process calls TerminateProcess() directly, bypassing any Python-level
+    handler entirely (killing the whole test run instead of raising
+    SystemExit). Calling the handler is what Python itself does once a
+    signal is actually delivered, so this exercises the same logic
+    portably.
     """
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sigint = signal.getsignal(signal.SIGINT)
     try:
         _install_signal_handlers()
+        handler = signal.getsignal(signal.SIGTERM)
         with pytest.raises(SystemExit) as exc_info:
-            os.kill(os.getpid(), signal.SIGTERM)
+            handler(signal.SIGTERM, None)
         assert exc_info.value.code == 143
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
