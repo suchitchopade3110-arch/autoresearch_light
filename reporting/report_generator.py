@@ -3,7 +3,10 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from observability.logging_config import get_logger
+
 EVOLUTION_REPORT_PATH = "evolution_report.jsonl"
+_module_logger = get_logger(__name__)
 
 
 def _read_evolution_generations(path: str = EVOLUTION_REPORT_PATH) -> List[Dict[str, Any]]:
@@ -131,7 +134,7 @@ Generated: {kpis['generated_at']}
 """
 
 
-def generate_report(db, approval_store=None, output_dir: str = "reports") -> str:
+def generate_report(db, approval_store=None, output_dir: str = "reports", logger=None) -> str:
     """Writes the end-of-run report to disk and returns its path."""
     kpis = compute_kpis(db, approval_store)
     os.makedirs(output_dir, exist_ok=True)
@@ -147,6 +150,9 @@ def generate_report(db, approval_store=None, output_dir: str = "reports") -> str
     with open(os.path.join(output_dir, "latest_report.json"), "w") as f:
         json.dump(kpis, f, indent=2)
 
-    print(f"\n=== Run report written to {report_path} ===")
+    (logger or _module_logger).info(f"Run report written to {report_path}")
+    # The report body itself is deliberately a direct print, not a log
+    # record - it's the run's human-facing deliverable output (read as
+    # markdown), not an operational trace event.
     print(markdown)
     return report_path

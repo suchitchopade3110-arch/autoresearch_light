@@ -114,6 +114,26 @@ class ApprovalStore:
             conn.commit()
             return cursor.rowcount > 0
 
+    def timeout_stale_requests(self, timeout_seconds: float) -> int:
+        """
+        Marks every pending request older than timeout_seconds as timed_out.
+        A request is normally timed out by whichever process is awaiting it
+        (see approval/gate.py:await_approval_decision) - but if that process
+        crashed or was killed before its own deadline check ever fired, the
+        request would otherwise stay 'pending' forever, blocking a reviewer's
+        dashboard with a decision nothing is ever going to resolve. Meant to
+        be run as part of startup/crash-recovery cleanup. Returns the count
+        of requests timed out.
+        """
+        cutoff = datetime.now(timezone.utc).timestamp() - timeout_seconds
+        count = 0
+        for request in self.list_pending():
+            created_at = datetime.fromisoformat(request["created_at"]).timestamp()
+            if created_at <= cutoff:
+                if self.decide(request["id"], "timed_out", note="Timed out during crash-recovery cleanup."):
+                    count += 1
+        return count
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         d = dict(row)

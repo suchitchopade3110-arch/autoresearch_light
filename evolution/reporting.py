@@ -1,6 +1,10 @@
 import json
 from typing import List, Dict, Any
 
+from observability.logging_config import get_logger
+
+_module_logger = get_logger(__name__)
+
 def log_generation_report(
     generation: int,
     scored_candidates: List[Dict[str, Any]],
@@ -10,7 +14,8 @@ def log_generation_report(
     convergence_signal: bool,
     duplicate_avoidance_count: int,
     duplicate_exhausted_count: int = 0,
-    log_file: str = "evolution_report.jsonl"
+    log_file: str = "evolution_report.jsonl",
+    logger=None,
 ):
     valid_scores = sorted([c['composite_score'] for c in scored_candidates if 'composite_score' in c])
 
@@ -39,4 +44,4 @@ def log_generation_report(
     with open(log_file, "a") as f:
         f.write(json.dumps(report) + "\n")
 
-    print(f"Generation Report: {json.dumps(report)}")
+    (logger or _module_logger).info(f"Generation Report: {json.dumps(report)}")

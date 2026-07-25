@@ -3,7 +3,10 @@ import os
 import re
 from typing import Any, Dict, Optional, Tuple
 
+from observability.logging_config import get_logger
+
 SCORE_PATTERN = re.compile(r"SCORE:\s*([-+]?\d*\.?\d+)")
+_module_logger = get_logger(__name__)
 SCORE_CLAIM_MISMATCH_THRESHOLD = 0.05
 
 
@@ -52,24 +55,31 @@ class EvalPipeline:
         return correct / len(truth), ""
 
     def evaluate_stage(self, execution_result: Dict[str, Any], subset_percentage: int, threshold: float,
-                        pred_path: str, truth: Dict[str, int]) -> Tuple[bool, float]:
-        """Evaluates a single stage's real execution result. Returns (success, score)."""
+                        pred_path: str, truth: Dict[str, int], logger=None) -> Tuple[bool, float]:
+        """
+        Evaluates a single stage's real execution result. Returns (success, score).
+        logger defaults to a module-level logger with no run/candidate context -
+        callers that have it (orchestrator/run.py, evolution/scheduler.py) should
+        pass a logger already bound with candidate_id so these records can be
+        correlated back to the candidate they're about.
+        """
+        log = logger or _module_logger
         if execution_result['exit_code'] != 0 or execution_result.get('timeout', False):
             return False, 0.0
 
         score, reason = self.score_predictions(pred_path, truth)
         if reason:
-            print(f"Stage {subset_percentage}%: prediction scoring failed: {reason}")
+            log.info(f"Stage {subset_percentage}%: prediction scoring failed: {reason}")
 
         claimed = self._parse_score(execution_result)
         if claimed is not None and abs(claimed - score) > SCORE_CLAIM_MISMATCH_THRESHOLD:
-            print(f"WARNING score_claim_mismatch: candidate claimed SCORE={claimed:.4f}, real score={score:.4f}")
+            log.warning(f"score_claim_mismatch: candidate claimed SCORE={claimed:.4f}, real score={score:.4f}")
 
         success = score >= threshold
 
-        print(f"Stage {subset_percentage}%: Score={score:.4f}, Threshold={threshold}")
+        log.info(f"Stage {subset_percentage}%: Score={score:.4f}, Threshold={threshold}")
         if not success:
-            print(f"Candidate failed at {subset_percentage}% subset.")
+            log.info(f"Candidate failed at {subset_percentage}% subset.")
 
         return success, score
 

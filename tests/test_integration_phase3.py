@@ -6,8 +6,10 @@ import shutil
 
 def test_full_loop_phase3_evolution():
     with tempfile.TemporaryDirectory() as temp_repo:
-        for item in ["configs", "orchestrator", "eval", "sandbox", "vcs", "memory", "generation", "evolution", "approval", "reporting"]:
+        for item in ["configs", "orchestrator", "eval", "sandbox", "vcs", "memory", "generation", "evolution",
+                     "approval", "reporting", "observability"]:
             shutil.copytree(item, os.path.join(temp_repo, item))
+        shutil.copy("config_schema.py", os.path.join(temp_repo, "config_schema.py"))
 
         with open(os.path.join(temp_repo, ".gitignore"), "w") as f:
             f.write("chroma_db/\n__pycache__/\n")
