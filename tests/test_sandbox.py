@@ -238,7 +238,15 @@ def test_run_candidate_widens_permissions_before_mounting():
                 executor = SandboxExecutor({'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m"})
                 executor.run_candidate(script_path, out_dir=out_dir)
 
-            assert oct(os.stat(script_path).st_mode & 0o777) == oct(0o644)
-            assert oct(os.stat(out_dir).st_mode & 0o777) == oct(0o777)
+            # Checked as "at least as permissive as", not exact equality -
+            # os.chmod on Windows has no POSIX-style granularity (it only
+            # toggles a read-only attribute), so os.stat there reports a
+            # fixed 0o666/0o444 regardless of the exact mode passed in.
+            # The bug this guards against is Linux/Docker-specific in the
+            # first place (see the docstring above); this assertion only
+            # needs to confirm the chmod call happened and didn't leave the
+            # restrictive 0600/0755 bits in place, on any platform.
+            assert os.stat(script_path).st_mode & 0o004, "script must be world-readable"
+            assert os.stat(out_dir).st_mode & 0o002, "out_dir must be world-writable"
         finally:
             os.remove(script_path)
