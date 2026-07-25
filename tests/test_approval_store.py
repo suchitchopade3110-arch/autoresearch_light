@@ -72,12 +72,18 @@ def test_timeout_stale_requests_times_out_only_requests_older_than_the_window():
 
         # Backdate the stale request's created_at directly - simulates a
         # request that has genuinely been sitting pending past the timeout.
+        # sqlite3's `with conn:` only commits/rolls back - it does not close
+        # the connection, which would leave a file handle open on Windows
+        # and block the TemporaryDirectory cleanup below. Close explicitly.
         old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=10000)).isoformat()
-        with sqlite3.connect(store.db_path) as conn:
+        conn = sqlite3.connect(store.db_path)
+        try:
             conn.execute(
                 "UPDATE approval_requests SET created_at = ? WHERE id = ?", (old_created_at, stale_id)
             )
             conn.commit()
+        finally:
+            conn.close()
 
         timed_out_count = store.timeout_stale_requests(timeout_seconds=1800)
 
@@ -93,11 +99,14 @@ def test_timeout_stale_requests_never_overrides_an_already_decided_request():
         store.decide(request_id, "approved")
 
         old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=10000)).isoformat()
-        with sqlite3.connect(store.db_path) as conn:
+        conn = sqlite3.connect(store.db_path)
+        try:
             conn.execute(
                 "UPDATE approval_requests SET created_at = ? WHERE id = ?", (old_created_at, request_id)
             )
             conn.commit()
+        finally:
+            conn.close()
 
         timed_out_count = store.timeout_stale_requests(timeout_seconds=1800)
 

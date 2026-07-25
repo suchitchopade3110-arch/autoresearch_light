@@ -88,7 +88,7 @@ class GitController:
         so anything matching "candidate-*" under worktree_root, or a
         "candidate-*" branch, is necessarily orphaned leftovers.
 
-        Never touches original_branch or anything outside worktree_root.
+        Never touches original_branch or the main worktree.
         """
         removed_worktrees = 0
 
@@ -97,21 +97,35 @@ class GitController:
         except git.GitCommandError:
             listing = ""
 
-        worktree_root_abs = os.path.abspath(self.worktree_root)
-        for line in listing.splitlines():
-            if not line.startswith("worktree "):
-                continue
-            path = line[len("worktree "):]
-            path_abs = os.path.abspath(path)
-            if path_abs == self.repo_path:
-                continue  # the main worktree itself - never remove it
-            try:
-                is_under_root = os.path.commonpath([path_abs, worktree_root_abs]) == worktree_root_abs
-            except ValueError:
-                is_under_root = False  # e.g. different drives on Windows
-            if is_under_root:
-                self.repo.git.worktree("remove", "--force", path)
-                removed_worktrees += 1
+        # A worktree is identified as an orphan candidate by the branch IT
+        # HAS CHECKED OUT (parsed from git's own porcelain output), not by
+        # string-comparing its path against worktree_root - Windows can
+        # report the same directory in short (8.3, e.g. "SUCHIT~1") or long
+        # form inconsistently between git and Python's os.path, which
+        # silently breaks path-based comparison even though both refer to
+        # the same directory on disk.
+        orphan_paths = []
+        current_path = None
+        current_branch = None
+        for line in listing.splitlines() + [""]:
+            if line.startswith("worktree "):
+                current_path = line[len("worktree "):]
+            elif line.startswith("branch refs/heads/"):
+                current_branch = line[len("branch refs/heads/"):]
+            elif line == "":
+                if (
+                    current_path
+                    and current_branch
+                    and current_branch.startswith("candidate-")
+                    and os.path.abspath(current_path) != self.repo_path
+                ):
+                    orphan_paths.append(current_path)
+                current_path = None
+                current_branch = None
+
+        for path in orphan_paths:
+            self.repo.git.worktree("remove", "--force", path)
+            removed_worktrees += 1
 
         # Drops stale administrative files for worktrees whose directory was
         # already deleted from disk (e.g. a crash mid-removal), which the
