@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git identity
+        # A fresh runner has no git identity configured - GitPython-driven
+        # tests that commit directly (e.g. tests/test_vcs.py) fail with
+        # "empty ident name" without this. A dev machine normally has this
+        # configured already, which is why it never surfaced before CI.
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full test suite
+        run: pytest -q

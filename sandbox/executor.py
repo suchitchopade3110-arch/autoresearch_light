@@ -22,6 +22,16 @@ class SandboxExecutor:
         self.timeout = config.get('timeout_seconds', 10)
         self.cpu_limit = config.get('cpu_limit', '1.0')
         self.memory_limit = config.get('memory_limit', '512m')
+        # pids_limit caps how many processes/threads a candidate can fork -
+        # without it, a fork bomb can exhaust the host's PID table even
+        # though CPU/memory are capped, since neither limit bounds process
+        # *count*. ulimit_nofile caps open file descriptors per-process for
+        # the same reason (a descriptor-exhaustion loop isn't CPU/memory-
+        # bound either). tmpfs_size_mb bounds the writable /tmp mount so it
+        # can't be filled up to exhaust host RAM (tmpfs is backed by RAM).
+        self.pids_limit = config.get('pids_limit', 128)
+        self.ulimit_nofile = config.get('ulimit_nofile', 1024)
+        self.tmpfs_size_mb = config.get('tmpfs_size_mb', 64)
         # train.jsonl/test.jsonl mounted read-only into every sandbox run if
         # set, so callers (the sequential loop and the concurrent
         # evolutionary scheduler alike) don't each need to know about
@@ -45,14 +55,26 @@ class SandboxExecutor:
         start_time = time.time()
         container_name = f"sandbox-{uuid.uuid4().hex[:8]}"
 
+        # A bind mount carries the HOST file's real permission bits into the
+        # container - the sandbox's UID (1000) is never the host process's
+        # own UID, so a file created with a restrictive mode (e.g. 0600,
+        # which tempfile.NamedTemporaryFile uses by default) is unreadable
+        # to it. This is silently masked on Docker Desktop for Windows/macOS
+        # (whose VM-backed bind mounts don't enforce host permission bits
+        # the same way) but fails immediately on native Linux Docker - so
+        # never assume the caller already got this right.
+        os.chmod(script_path, 0o644)
+
         cmd = [
             "docker", "run", "--rm",
             f"--name={container_name}",
             f"--cpus={self.cpu_limit}",
             f"--memory={self.memory_limit}",
+            f"--pids-limit={self.pids_limit}",
+            "--ulimit", f"nofile={self.ulimit_nofile}",
             "--network", "none",
             "--read-only",
-            "--tmpfs", "/tmp",
+            "--tmpfs", f"/tmp:size={self.tmpfs_size_mb}m",
             "--security-opt", "no-new-privileges",
             "--cap-drop", "ALL",
             "-v", f"{script_path}:/app/candidate_script.py:ro",
@@ -69,6 +91,13 @@ class SandboxExecutor:
 
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
+            # os.makedirs uses the process umask, typically leaving a
+            # directory writable only by its owner (0755) - the sandbox's
+            # UID needs to create predictions.jsonl inside it, so it must
+            # be writable by everyone, not just whichever UID happened to
+            # create it host-side. Same host-vs-container UID mismatch as
+            # the script mount above.
+            os.chmod(out_dir, 0o777)
             # A read-write bind mount coexists fine with --read-only on the
             # root filesystem - only this path is writable.
             cmd += ["-v", f"{os.path.abspath(out_dir)}:/app/out:rw"]

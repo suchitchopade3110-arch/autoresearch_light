@@ -7,6 +7,15 @@ import json
 from datetime import datetime, timezone
 
 class ExperimentDB:
+    """
+    RAG-style memory of past candidates, backed by a local ChromaDB
+    collection. Every experiment (success, failure, held, or conflict) is
+    embedded and stored so generation/prompt_builder.py can retrieve
+    similar past successes/failures into the next prompt, and
+    evolution/duplicate_checker.py can check a new diff against
+    near-duplicates already tried - both by nearest-neighbor search over
+    the same collection, not separate stores.
+    """
     def __init__(self, db_path: str = "./chroma_db"):
         self.client = chromadb.PersistentClient(path=db_path)
         # using default sentence-transformers model embedded in chromadb
@@ -57,6 +66,18 @@ class ExperimentDB:
             ids=[record_id]
         )
         return record_id
+
+    def has_exact_diff(self, diff: str) -> bool:
+        """
+        Cheap exact-match check via a metadata filter - collection.get()
+        does not invoke the embedding function, unlike collection.query().
+        Lets duplicate_checker.py short-circuit on an exact repeat (e.g. a
+        deterministic client like MockLLMClient re-proposing the same
+        diff) without paying for an embedding + nearest-neighbor search
+        just to then string-compare the result.
+        """
+        results = self.collection.get(where={"diff": diff}, limit=1)
+        return bool(results and results.get('ids'))
 
     def retrieve_experiments(self, query: str, k: int = 3, filter_outcome: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieves top-k most similar experiments based on query text."""

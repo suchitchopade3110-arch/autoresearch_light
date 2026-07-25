@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
+
 import pytest
 from sandbox.executor import SandboxExecutor
 
@@ -172,3 +174,79 @@ def test_sandbox_has_no_network_access(sandbox):
         assert "NO_NETWORK" in result['stdout']
     finally:
         os.remove(script_path)
+
+
+def test_docker_run_command_includes_resource_hardening_flags():
+    """
+    Wave 4 acceptance: CPU/memory limits alone don't bound process count or
+    open file descriptors (a fork bomb or fd-exhaustion loop isn't CPU/
+    memory-bound), and an unbounded /tmp tmpfs can exhaust host RAM since
+    tmpfs is RAM-backed. Doesn't need a real docker daemon - mocks
+    subprocess.run and inspects the constructed command directly.
+    """
+    with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+        script_path = f.name
+
+    try:
+        with patch("sandbox.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            config = {
+                'timeout_seconds': 10,
+                'cpu_limit': "0.5",
+                'memory_limit': "256m",
+                'pids_limit': 64,
+                'ulimit_nofile': 512,
+                'tmpfs_size_mb': 32,
+            }
+            executor = SandboxExecutor(config)
+            executor.run_candidate(script_path)
+
+            run_call = next(c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "run"])
+            cmd = run_call.args[0]
+
+            assert "--pids-limit=64" in cmd
+            assert "--ulimit" in cmd
+            assert "nofile=512" in cmd
+            assert "--tmpfs" in cmd
+            assert "/tmp:size=32m" in cmd
+    finally:
+        os.remove(script_path)
+
+
+def test_run_candidate_widens_permissions_before_mounting():
+    """
+    Wave 4 acceptance (CI regression): a bind mount carries the HOST file's
+    real permission bits into the container - a script created with a
+    restrictive mode (e.g. 0600, which tempfile.NamedTemporaryFile uses by
+    default) or an out_dir left at the default 0755 from os.makedirs is
+    unreadable/unwritable to the sandbox's non-root UID on native Linux
+    Docker. This was silently masked on Docker Desktop for Windows/macOS
+    (whose VM-backed bind mounts don't enforce host permission bits the
+    same way), which is how it first shipped - only surfaced once this ran
+    on a native Linux CI runner. Doesn't need a real docker daemon.
+    """
+    with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+        script_path = f.name
+    os.chmod(script_path, 0o600)
+
+    with tempfile.TemporaryDirectory() as parent:
+        out_dir = os.path.join(parent, "out")
+
+        try:
+            with patch("sandbox.executor.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                executor = SandboxExecutor({'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m"})
+                executor.run_candidate(script_path, out_dir=out_dir)
+
+            # Checked as "at least as permissive as", not exact equality -
+            # os.chmod on Windows has no POSIX-style granularity (it only
+            # toggles a read-only attribute), so os.stat there reports a
+            # fixed 0o666/0o444 regardless of the exact mode passed in.
+            # The bug this guards against is Linux/Docker-specific in the
+            # first place (see the docstring above); this assertion only
+            # needs to confirm the chmod call happened and didn't leave the
+            # restrictive 0600/0755 bits in place, on any platform.
+            assert os.stat(script_path).st_mode & 0o004, "script must be world-readable"
+            assert os.stat(out_dir).st_mode & 0o002, "out_dir must be world-writable"
+        finally:
+            os.remove(script_path)
