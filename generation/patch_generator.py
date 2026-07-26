@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import os
 import subprocess
 import tempfile
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from observability.logging_config import get_logger
 
@@ -266,21 +266,43 @@ class PatchGenerator:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
 
-    def generate_and_apply(self, prompt: str, target_file: str, cwd: Optional[str] = None, logger=None) -> bool:
+    def generate_and_apply(self, prompt: str, target_file: Union[str, List[str]], cwd: Optional[str] = None, logger=None) -> bool:
         """
         Generates a patch and attempts to apply it in `cwd` (a candidate's
         own worktree). Returns (success, diff).
+
+        target_file is either a single filename (str - the original
+        contract, unchanged) or a list of filenames for a multi-file
+        candidate. LLMClient.generate_diff's own signature stays
+        single-file: for a list, this calls it once per file, each
+        against THAT file's own current content, and applies each diff in
+        turn via the existing single-file validate_and_apply_patch. On
+        the first file whose diff fails to apply, this returns False
+        immediately with whatever diffs were generated so far - no custom
+        partial-failure rollback is built here, since the caller
+        (orchestrator/run.py) already discards the whole worktree via
+        vcs.rollback() on any failure, making a partially-applied
+        multi-file patch safe to just walk away from. For a plain str
+        target_file, behavior and the returned diff are unchanged from
+        before multi-file support existed.
         """
         log = logger or _module_logger
-        file_path = os.path.join(cwd, target_file) if cwd else target_file
-        try:
-            with open(file_path) as f:
-                current_content = f.read()
-        except FileNotFoundError:
-            current_content = ""
+        target_files = [target_file] if isinstance(target_file, str) else list(target_file)
 
-        diff = self.llm_client.generate_diff(prompt, target_file, current_content)
+        diffs = []
+        for f in target_files:
+            file_path = os.path.join(cwd, f) if cwd else f
+            try:
+                with open(file_path) as fh:
+                    current_content = fh.read()
+            except FileNotFoundError:
+                current_content = ""
 
-        log.info(f"Generated diff:\n{diff}")
+            diff = self.llm_client.generate_diff(prompt, f, current_content)
+            log.info(f"Generated diff:\n{diff}")
+            diffs.append(diff)
 
-        return validate_and_apply_patch(diff, cwd=cwd, logger=log), diff
+            if not validate_and_apply_patch(diff, cwd=cwd, logger=log):
+                return False, "\n".join(diffs)
+
+        return True, "\n".join(diffs)

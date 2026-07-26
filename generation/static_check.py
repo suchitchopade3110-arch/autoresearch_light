@@ -1,6 +1,6 @@
 import ast
 import os
-from typing import Tuple
+from typing import List, Tuple
 
 def check_syntax(file_path: str) -> Tuple[bool, str]:
     """
@@ -19,3 +19,19 @@ def check_syntax(file_path: str) -> Tuple[bool, str]:
     except SyntaxError as e:
         error_msg = f"SyntaxError in {file_path}:\nLine {e.lineno}: {e.msg}\n{e.text}"
         return False, error_msg
+
+
+def check_syntax_multi(file_paths: List[str]) -> Tuple[bool, str]:
+    """
+    Runs check_syntax() across multiple files, returning on the first
+    failure - consistent with how a single check_syntax() error message is
+    used downstream (stored as one failure_reason string, not a list, so
+    aggregating every file's errors would need a wider change there too).
+    For a single-element list, behavior and the returned message are
+    identical to calling check_syntax() directly.
+    """
+    for path in file_paths:
+        ok, error_msg = check_syntax(path)
+        if not ok:
+            return False, error_msg
+    return True, ""

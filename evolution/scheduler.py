@@ -54,7 +54,14 @@ class ConcurrentScheduler:
         truth = truth or {}
 
         def evaluate_only(candidate: Dict[str, Any]) -> Dict[str, Any]:
-            """Phase 1 body: apply, commit, evaluate. Never touches approval or merge."""
+            """
+            Phase 1 body: apply, commit, evaluate. Never touches approval or
+            merge.
+
+            KNOWN LIMITATION: hardcoded to "candidate_script.py", like
+            evolution/population.py's candidate generation - evolutionary
+            mode does not support target.files multi-file candidates yet.
+            """
             c_id = candidate['id']
             diff = candidate['diff']
             candidate_logger = bind(self.logger, candidate_id=c_id)
