@@ -58,6 +58,14 @@ class EvalPipeline:
     def __init__(self, config: Dict[str, Any]):
         self.stages = config.get('stages', [])
         self.correlation_log = []
+        # Set by evaluate_stage() for the stage just evaluated - callers
+        # that need this (see approval/gate.py's auto-approve criteria)
+        # must read it immediately after the call, the same way
+        # AnthropicClient.last_usage is read immediately after
+        # generate_diff (see generation/patch_generator.py), since this is
+        # a single shared EvalPipeline instance across every candidate and
+        # stage, not per-call state.
+        self.last_stage_flags: Dict[str, Any] = {}
 
     def score_predictions(self, pred_path: str, truth: Dict[str, int]) -> Tuple[float, str]:
         """
@@ -109,8 +117,10 @@ class EvalPipeline:
             log.info(f"Stage {subset_percentage}%: prediction scoring failed: {reason}")
 
         claimed = self._parse_score(execution_result)
-        if claimed is not None and abs(claimed - score) > SCORE_CLAIM_MISMATCH_THRESHOLD:
+        mismatch = claimed is not None and abs(claimed - score) > SCORE_CLAIM_MISMATCH_THRESHOLD
+        if mismatch:
             log.warning(f"score_claim_mismatch: candidate claimed SCORE={claimed:.4f}, real score={score:.4f}")
+        self.last_stage_flags = {"score_claim_mismatch": mismatch}
 
         success = score >= threshold
 

@@ -69,10 +69,13 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
 
     approvals = approval_store.list_all() if approval_store else []
     approved = sum(1 for a in approvals if a["status"] == "approved")
+    # A distinct terminal state from "approved" (see approval/store.py) -
+    # a human never decided these, approval.auto_approve's criteria did.
+    auto_approved = sum(1 for a in approvals if a["status"] == "auto_approved")
     rejected = sum(1 for a in approvals if a["status"] == "rejected")
     timed_out = sum(1 for a in approvals if a["status"] == "timed_out")
     pending = sum(1 for a in approvals if a["status"] == "pending")
-    decided = approved + rejected + timed_out
+    decided = approved + auto_approved + rejected + timed_out
     approval_timeout_rate = timed_out / decided if decided else 0.0
 
     return {
@@ -93,6 +96,7 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
         "approvals": {
             "pending": pending,
             "approved": approved,
+            "auto_approved": auto_approved,
             "rejected": rejected,
             "timed_out": timed_out,
             "timeout_rate": approval_timeout_rate,
@@ -128,6 +132,7 @@ Generated: {kpis['generated_at']}
 ## Human approval gate
 - Pending: {kpis['approvals']['pending']}
 - Approved: {kpis['approvals']['approved']}
+- Auto-approved (approval.auto_approve criteria, no human decision): {kpis['approvals']['auto_approved']}
 - Rejected: {kpis['approvals']['rejected']}
 - Timed out (held, not merged): {kpis['approvals']['timed_out']}
 - Timeout rate (of decided): {kpis['approvals']['timeout_rate']:.1%}

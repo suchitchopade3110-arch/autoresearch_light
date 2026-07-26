@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-VALID_STATUSES = ("approved", "rejected", "timed_out")
+VALID_STATUSES = ("approved", "auto_approved", "rejected", "timed_out")
 
 
 class ApprovalStore:

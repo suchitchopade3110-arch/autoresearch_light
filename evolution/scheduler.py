@@ -3,7 +3,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-from approval.gate import await_approval_decision, create_approval_request
+from approval.gate import await_approval_decision, create_approval_request, maybe_auto_approve
 from approval.store import ApprovalStore
 from generation.patch_generator import validate_and_apply_patch
 from observability.logging_config import bind, get_logger
@@ -101,6 +101,7 @@ class ConcurrentScheduler:
                 error_msg = ""
                 total_execution_time = 0.0
                 last_subset = None
+                has_failure_flags = False
 
                 for stage in eval_stages:
                     subset = stage['subset_percentage']
@@ -115,6 +116,10 @@ class ConcurrentScheduler:
                     stage_success, stage_score = evaluator.evaluate_stage(
                         exec_result, subset, threshold, pred_path, truth, logger=candidate_logger
                     )
+                    # Read immediately after the call - evaluator is a
+                    # single shared EvalPipeline instance across every
+                    # candidate/stage (see eval/pipeline.py:last_stage_flags).
+                    has_failure_flags = has_failure_flags or bool(evaluator.last_stage_flags.get("score_claim_mismatch", False))
                     last_subset = subset
 
                     if not stage_success:
@@ -145,6 +150,10 @@ class ConcurrentScheduler:
 
                 all_metrics['baseline_score'] = baseline_score
                 all_metrics['delta'] = delta
+                # Consumed by approval/gate.py's should_auto_approve as the
+                # require_no_failure_flags criterion - see
+                # orchestrator/run.py's sequential-path equivalent.
+                all_metrics['score_claim_mismatch'] = has_failure_flags
                 generation_usage = candidate.get('generation_usage') or {}
                 if generation_usage:
                     all_metrics['generation_input_tokens'] = generation_usage.get('input_tokens', 0)
@@ -205,6 +214,11 @@ class ConcurrentScheduler:
             c['_approval_request_id'] = request_id
             if request_id is None:
                 c['approval_decision'] = 'skipped'
+            else:
+                c['approval_decision'] = maybe_auto_approve(
+                    store, request_id, gate_config,
+                    c['metrics'].get('delta'), bool(c['metrics'].get('score_claim_mismatch')),
+                )
 
         for c in passed:
             if c['approval_decision'] is None:
@@ -212,7 +226,7 @@ class ConcurrentScheduler:
             decision = c['approval_decision']
 
             with self.git_lock:
-                if decision in ("approved", "skipped"):
+                if decision in ("approved", "auto_approved", "skipped"):
                     try:
                         git_controller.merge(c['branch_name'], c['worktree_path'])
                         c['success'] = True

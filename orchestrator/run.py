@@ -277,6 +277,7 @@ def main():
         last_subset = None
         metrics = {}
         execution_result = None
+        has_failure_flags = False
 
         for stage in eval_stages:
             subset = stage['subset_percentage']
@@ -297,6 +298,10 @@ def main():
             stage_success, final_score = evaluator.evaluate_stage(
                 execution_result, subset, threshold, pred_path, truth, logger=candidate_logger
             )
+            # Read immediately after the call - evaluator is a single
+            # shared EvalPipeline instance across every candidate/stage
+            # (see eval/pipeline.py:last_stage_flags).
+            has_failure_flags = has_failure_flags or bool(evaluator.last_stage_flags.get("score_claim_mismatch", False))
             last_subset = subset
             if not stage_success:
                 eval_passed = False
@@ -325,6 +330,11 @@ def main():
 
         metrics['baseline_score'] = baseline_score
         metrics['delta'] = delta
+        # Consumed by approval/gate.py's should_auto_approve as the
+        # require_no_failure_flags criterion - currently the only known
+        # flag is a candidate's printed SCORE claim not matching its real,
+        # scored result (see eval/pipeline.py's reward-hacking guard).
+        metrics['score_claim_mismatch'] = has_failure_flags
         if generation_usage:
             metrics['generation_input_tokens'] = generation_usage.get('input_tokens', 0)
             metrics['generation_output_tokens'] = generation_usage.get('output_tokens', 0)
@@ -352,14 +362,16 @@ def main():
             vcs.rollback(branch_name, worktree_path)
         else:
             # 6. Human-approval gate - genuinely blocks the merge path.
-            # Only "approved" or "skipped" (gate explicitly disabled) may
-            # proceed to merge; "rejected" and "timed_out" roll back.
+            # Only "approved", "auto_approved" (approval.auto_approve's
+            # criteria cleared - see approval/gate.py), or "skipped" (gate
+            # explicitly disabled) may proceed to merge; "rejected" and
+            # "timed_out" roll back.
             candidate_logger.info(f"Candidate {candidate_id} passed evaluation with score {final_score:.4f}. Awaiting approval...")
             decision = request_and_await_approval(
                 approval_store, candidate_id, goal, diff, final_score, metrics, config
             )
 
-            if decision in ("approved", "skipped"):
+            if decision in ("approved", "auto_approved", "skipped"):
                 candidate_logger.info(f"Candidate {candidate_id} approved ({decision}). Merging.")
                 try:
                     vcs.merge(branch_name, worktree_path)
