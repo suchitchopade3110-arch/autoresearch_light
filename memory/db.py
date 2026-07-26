@@ -37,9 +37,19 @@ class ExperimentDB:
         rationale: str,
         metrics: Dict[str, float],
         outcome: str,
-        failure_reason: Optional[str] = None
+        failure_reason: Optional[str] = None,
+        traceback: Optional[str] = None,
     ) -> str:
-        """Stores an experiment run in the vector DB."""
+        """
+        Stores an experiment run in the vector DB. traceback is the raw
+        diagnostic text (a real git-apply error, or the sandboxed
+        candidate's actual stderr) when one exists - kept as its own
+        structured field, distinct from failure_reason, since
+        failure_reason is often just a human-readable category label (e.g.
+        "Malformed diff rejected by git apply.") with no real diagnostic
+        content of its own. generation/prompt_builder.py reads this field
+        specifically to feed the real signal into the next prompt.
+        """
         record_id = uuid.uuid4().hex
 
         # Combine text for embedding so it's retrievable by similar hypotheses,
@@ -49,6 +59,8 @@ class ExperimentDB:
         document = f"Hypothesis: {hypothesis}\nRationale: {rationale}\nOutcome: {outcome}\nDiff:\n{diff}"
         if failure_reason:
             document += f"\nFailure Reason: {failure_reason}"
+        if traceback:
+            document += f"\nTraceback:\n{traceback}"
 
         metadata = {
             "hypothesis": hypothesis,
@@ -57,6 +69,9 @@ class ExperimentDB:
             "metrics": json.dumps(metrics),
             "outcome": outcome,
             "failure_reason": failure_reason or "",
+            # ChromaDB metadata values must be str/int/float/bool, never
+            # None - same reason failure_reason above falls back to "".
+            "traceback": traceback or "",
             "created_at": datetime.now(timezone.utc).isoformat()
         }
 

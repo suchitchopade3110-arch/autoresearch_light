@@ -86,8 +86,13 @@ class ConcurrentScheduler:
                         f.write("\n")
 
                 if diff.strip():
-                    if not validate_and_apply_patch(diff, cwd=worktree_path, logger=candidate_logger):
-                        raise RuntimeError(f"Patch failed to apply for candidate {c_id}")
+                    apply_error: List[str] = []
+                    if not validate_and_apply_patch(diff, cwd=worktree_path, logger=candidate_logger, error_out=apply_error):
+                        # The real git-apply diagnostic, not just a generic
+                        # label - see generation/patch_generator.py's
+                        # error_out param.
+                        detail = apply_error[0] if apply_error else "unknown error"
+                        raise RuntimeError(f"Patch failed to apply for candidate {c_id}: {detail}")
 
                 git_controller.commit_patch(worktree_path, f"Add candidate {c_id}")
 
@@ -99,6 +104,7 @@ class ConcurrentScheduler:
                 eval_passed = True
                 failure_category = "success"
                 error_msg = ""
+                traceback_text = ""
                 total_execution_time = 0.0
                 last_subset = None
                 has_failure_flags = False
@@ -125,9 +131,10 @@ class ConcurrentScheduler:
                     if not stage_success:
                         eval_passed = False
                         final_score = stage_score
-                        cat, msg = failure_analyzer(exec_result, False)
+                        cat, msg, tb = failure_analyzer(exec_result, False)
                         failure_category = cat
                         error_msg = msg
+                        traceback_text = tb
                         all_metrics = metrics_calculator(exec_result)
                         break
 
@@ -167,6 +174,7 @@ class ConcurrentScheduler:
                 candidate['metrics'] = all_metrics
                 candidate['failure_category'] = failure_category
                 candidate['error_msg'] = error_msg
+                candidate['traceback'] = traceback_text
                 candidate['total_execution_time'] = total_execution_time
                 candidate['last_subset'] = last_subset
                 candidate['success'] = False
@@ -194,6 +202,7 @@ class ConcurrentScheduler:
                 candidate['approval_decision'] = None
                 candidate['failure_category'] = "runtime"
                 candidate['error_msg'] = str(e)
+                candidate['traceback'] = str(e)
                 candidate['metrics'] = {}
                 candidate['final_score'] = 0.0
                 candidate['total_execution_time'] = 0.0

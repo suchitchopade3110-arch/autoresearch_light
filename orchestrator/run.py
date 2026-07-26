@@ -241,7 +241,12 @@ def main():
                 rationale="Prompt generated malformed diff",
                 metrics={},
                 outcome="failure",
-                failure_reason="Malformed diff rejected by git apply."
+                failure_reason="Malformed diff rejected by git apply.",
+                # The real git-apply diagnostic (e.g. "error: patch failed:
+                # file.py:10"), not just this generic label - without it,
+                # every malformed-diff failure record looked identical
+                # regardless of what was actually wrong with that diff.
+                traceback=patch_generator.last_apply_error or None,
             )
             vcs.rollback(branch_name, worktree_path)
             return False, 0.0
@@ -259,7 +264,8 @@ def main():
                 rationale="Prompt generated syntax error",
                 metrics={},
                 outcome="failure",
-                failure_reason=syntax_err
+                failure_reason=syntax_err,
+                traceback=syntax_err,
             )
             vcs.rollback(branch_name, worktree_path)
             return False, 0.0
@@ -342,11 +348,11 @@ def main():
 
         # 5. Analyze failure and log to Memory
         if below_baseline:
-            category, error_text = "below_baseline", (
+            category, error_text, traceback_text = "below_baseline", (
                 f"score {final_score:.4f} did not beat baseline {baseline_score:.4f} + {min_improvement}"
-            )
+            ), ""  # no real trace applies - this is a threshold comparison, not a crash
         else:
-            category, error_text = analyze_failure(execution_result, eval_passed)
+            category, error_text, traceback_text = analyze_failure(execution_result, eval_passed)
 
         merged = False
         if not eval_passed:
@@ -357,7 +363,8 @@ def main():
                 rationale="Generated patch failed",
                 metrics=metrics,
                 outcome="failure",
-                failure_reason=error_text
+                failure_reason=error_text,
+                traceback=traceback_text or None,
             )
             vcs.rollback(branch_name, worktree_path)
         else:
