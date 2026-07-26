@@ -4,6 +4,10 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from observability.logging_config import get_logger
+
+_module_logger = get_logger(__name__)
+
 
 class SandboxExecutor:
     """
@@ -32,6 +36,21 @@ class SandboxExecutor:
         self.pids_limit = config.get('pids_limit', 128)
         self.ulimit_nofile = config.get('ulimit_nofile', 1024)
         self.tmpfs_size_mb = config.get('tmpfs_size_mb', 64)
+        # Opt-in only, never enabled by default - GPU passthrough (via the
+        # NVIDIA Container Toolkit) is an isolation trade-off the operator
+        # must choose explicitly, not something this harness should decide
+        # on their behalf. A value like "all" or "device=0" is passed
+        # straight through to `docker run --gpus`; leave unset (None) to
+        # keep candidates with no GPU access at all, same as today.
+        self.gpus = config.get('gpus')
+        if self.gpus:
+            _module_logger.warning(
+                f"sandbox.gpus={self.gpus!r} is set - candidates get GPU access via --gpus. "
+                "This requires the NVIDIA Container Toolkit on the host and reduces the "
+                "sandbox's isolation guarantees (a GPU driver is a much larger, less "
+                "audited attack surface than the CPU-only path). Enable only if you trust "
+                "the candidates being generated."
+            )
         # train.jsonl/test.jsonl mounted read-only into every sandbox run if
         # set, so callers (the sequential loop and the concurrent
         # evolutionary scheduler alike) don't each need to know about
@@ -79,6 +98,9 @@ class SandboxExecutor:
             "--cap-drop", "ALL",
             "-v", f"{script_path}:/app/candidate_script.py:ro",
         ]
+
+        if self.gpus:
+            cmd += ["--gpus", self.gpus]
 
         run_env = dict(env_vars or {})
         if self.dataset_dir:

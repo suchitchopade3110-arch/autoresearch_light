@@ -258,6 +258,49 @@ def test_docker_run_command_includes_resource_hardening_flags():
         os.remove(script_path)
 
 
+def test_gpu_access_is_absent_by_default():
+    """
+    Priority 1 acceptance: GPU passthrough is an isolation trade-off the
+    operator must opt into explicitly - the default config must never grant
+    it. Doesn't need a real docker daemon or GPU.
+    """
+    with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+        script_path = f.name
+
+    try:
+        with patch("sandbox.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            executor = SandboxExecutor({'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m"})
+            executor.run_candidate(script_path)
+
+            run_call = next(c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "run"])
+            cmd = run_call.args[0]
+
+            assert "--gpus" not in cmd
+    finally:
+        os.remove(script_path)
+
+
+def test_gpu_access_is_granted_only_when_explicitly_configured():
+    """A configured sandbox.gpus value is passed straight through to `docker run --gpus`."""
+    with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+        script_path = f.name
+
+    try:
+        with patch("sandbox.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            executor = SandboxExecutor({'timeout_seconds': 10, 'cpu_limit': "0.5", 'memory_limit': "256m", 'gpus': "all"})
+            executor.run_candidate(script_path)
+
+            run_call = next(c for c in mock_run.call_args_list if c.args[0][:2] == ["docker", "run"])
+            cmd = run_call.args[0]
+
+            assert "--gpus" in cmd
+            assert "all" in cmd
+    finally:
+        os.remove(script_path)
+
+
 def test_run_candidate_widens_permissions_before_mounting():
     """
     Wave 4 acceptance (CI regression): a bind mount carries the HOST file's
