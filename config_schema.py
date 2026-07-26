@@ -49,6 +49,23 @@ class TargetConfig(BaseModel):
     # currently points to" - only needed to pin a base when repo_path may
     # be in a detached HEAD state (see vcs/git_controller.py).
     base_ref: Optional[str] = None
+    # The file(s) a candidate patch may touch. Defaults to just the
+    # original single file. Must always include "candidate_script.py" -
+    # the sandbox's Dockerfile CMD always executes that exact filename, so
+    # a file list without it would silently generate patches for files the
+    # sandbox never runs.
+    files: List[str] = Field(default_factory=lambda: ["candidate_script.py"])
+
+    @field_validator("files")
+    @classmethod
+    def files_must_include_candidate_script(cls, v: List[str]) -> List[str]:
+        if "candidate_script.py" not in v:
+            raise ValueError(
+                "target.files must include 'candidate_script.py' - the sandbox's "
+                "Dockerfile CMD always executes that exact filename, so omitting it "
+                "would silently generate patches for files the sandbox never runs."
+            )
+        return v
 
 
 class Config(BaseModel):

@@ -18,7 +18,7 @@ from memory.db import ExperimentDB
 from memory.failure_analysis import analyze_failure
 from generation.prompt_builder import PromptBuilder
 from generation.patch_generator import PatchGenerator, MockLLMClient, AnthropicClient
-from generation.static_check import check_syntax
+from generation.static_check import check_syntax_multi
 
 # Phase 4 imports
 from approval.store import ApprovalStore
@@ -203,6 +203,10 @@ def main():
         sys.exit(0)
 
     eval_stages = config.get('eval', {}).get('stages', [])
+    # config_schema.py's TargetConfig validator guarantees "candidate_script.py"
+    # is always present in this list - the sandbox's Dockerfile CMD always
+    # executes that exact filename.
+    target_files = target_cfg.get('files', ['candidate_script.py'])
 
     def run_iteration(candidate_id: str, goal: str):
         candidate_logger = bind(logger, candidate_id=candidate_id)
@@ -214,6 +218,7 @@ def main():
         candidate_logger.info(f"Created branch {branch_name} (worktree: {worktree_path})")
 
         script_path = os.path.join(worktree_path, "candidate_script.py")
+        extra_file_paths = [os.path.join(worktree_path, f) for f in target_files if f != "candidate_script.py"]
 
         # 2. Phase 2 Generation - apply the patch inside the candidate's own
         # worktree (cwd=worktree_path), not the shared main checkout.
@@ -222,7 +227,7 @@ def main():
 
         candidate_logger.info("Generating and applying patch...")
         apply_success, diff = patch_generator.generate_and_apply(
-            prompt, "candidate_script.py", cwd=worktree_path, logger=candidate_logger
+            prompt, target_files, cwd=worktree_path, logger=candidate_logger
         )
         # Only AnthropicClient sets this - MockLLMClient makes no API calls,
         # so there's no cost to attribute.
@@ -245,7 +250,7 @@ def main():
 
         # 3. Static Analysis Pre-check
         candidate_logger.info("Running static analysis...")
-        syntax_ok, syntax_err = check_syntax(script_path)
+        syntax_ok, syntax_err = check_syntax_multi([script_path] + extra_file_paths)
         if not syntax_ok:
             candidate_logger.warning(f"Static check failed: {syntax_err}")
             db.store_experiment(
@@ -279,7 +284,8 @@ def main():
 
             candidate_logger.info(f"Running in sandbox (subset={subset}%)...")
             execution_result = sandbox.run_candidate(
-                script_path, env_vars={"SUBSET_PERCENTAGE": str(subset)}, out_dir=out_dir
+                script_path, env_vars={"SUBSET_PERCENTAGE": str(subset)}, out_dir=out_dir,
+                extra_files=extra_file_paths or None,
             )
 
             if execution_result['timeout']:

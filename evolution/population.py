@@ -56,6 +56,14 @@ class EvolutionEngine:
         callers must not substitute a scoreless fallback diff in that
         case (it would burn a full sandbox x stages budget on something
         that cannot score); the worktree is rolled back before returning.
+
+        KNOWN LIMITATION: hardcoded to "candidate_script.py", unlike the
+        sequential path (orchestrator/run.py), which supports target.files
+        for multi-file candidates. This bypasses PatchGenerator.
+        generate_and_apply() entirely (calling llm_client.generate_diff()
+        directly), so multi-file support added there doesn't reach here.
+        Extending evolutionary mode to multi-file candidates needs its own
+        design pass - not silently half-supported in this one.
         """
         candidate_id = uuid.uuid4().hex[:8]
         candidate_logger = bind(self.logger, candidate_id=candidate_id)

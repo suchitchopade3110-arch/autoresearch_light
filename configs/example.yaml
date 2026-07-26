@@ -20,6 +20,11 @@ sandbox:
   pids_limit: 128
   ulimit_nofile: 1024
   tmpfs_size_mb: 64
+  # Opt-in only - GPU passthrough is an isolation trade-off you must choose
+  # explicitly (requires the NVIDIA Container Toolkit on the host). Unset
+  # by default, meaning no GPU access at all. Uncomment and pass a value
+  # docker's own --gpus flag accepts, e.g. "all" or "device=0".
+  # gpus: "all"
 
 dataset:
   path: "dummy_data"
