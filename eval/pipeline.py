@@ -1,3 +1,40 @@
+# =============================================================================
+# HARD INVARIANT - read this in full before changing anything in this file,
+# eval/dataset.py, or sandbox/executor.py:
+#
+#   1. truth.json (the held-out labels) is NEVER mounted into the sandbox.
+#      It is loaded host-side only, via eval/dataset.py:load_truth(), and
+#      passed into this module as an in-memory dict. No code path here (or
+#      in sandbox/executor.py) may ever construct a docker mount argument
+#      referencing truth.json, or make it readable from inside a container.
+#      truth.json lives on disk in the SAME directory as train.jsonl/
+#      test.jsonl (see eval/dataset.py:generate_split) - the only reason it
+#      stays hidden is that sandbox/executor.py mounts individual files
+#      (`-v host_path:container_path:ro`), never the whole directory. If
+#      that ever changes to a directory-level mount, this invariant breaks
+#      silently.
+#
+#   2. score_predictions() is the ONLY source of truth for a candidate's
+#      score. Nothing a candidate writes to stdout/stderr is ever trusted
+#      for gating - see _parse_score(), which exists purely to detect a
+#      mismatch (a candidate lying about its own performance), never to
+#      substitute for a real score.
+#
+# Both properties are enforced by permanent regression tests that must
+# never be deleted, skipped, or weakened:
+#   - tests/test_reward_hacking.py::test_printed_score_claim_is_never_trusted
+#   - tests/test_reward_hacking.py::test_truth_json_never_referenced_by_the_sandbox_executor
+#   - tests/test_reward_hacking.py::test_truth_json_absent_from_every_docker_mount_argument_repo_wide
+#   - tests/test_sandbox.py::test_truth_json_unreachable_by_any_path_inside_the_sandbox
+#     (walks the ENTIRE container filesystem for a file literally named
+#     truth.json - proof that no path construction trick, not just the one
+#     obvious path, can ever reach it)
+#
+# If you're about to mount a whole directory (rather than individual
+# files) into the sandbox, or change how/where truth is loaded, stop and
+# re-run every test above first.
+# =============================================================================
+
 import json
 import os
 import re
