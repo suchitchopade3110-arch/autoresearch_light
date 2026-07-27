@@ -43,6 +43,12 @@ class EvolutionEngine:
         self.duplicate_avoidance_count = 0
         self.duplicate_exhausted_count = 0
         self.generation_failed_count = 0
+        # The most recent malformed-diff rejection's real git-apply
+        # diagnostic, set by _generate_candidate and read by
+        # _generate_population - same side-channel pattern already used by
+        # the counters above to learn *why* _generate_candidate returned
+        # None without changing its return type.
+        self._last_malformed_detail = ""
 
     def _generate_candidate(self, goal: str, mutation_context: str = "") -> Optional[Dict[str, Any]]:
         """
@@ -89,8 +95,10 @@ class EvolutionEngine:
             # reflect whichever candidate was generated most recently.
             generation_usage = getattr(self.patch_generator.llm_client, "last_usage", {}) or {}
 
-            if not validate_and_apply_patch(diff, cwd=worktree_path, dry_run=True, logger=candidate_logger):
+            error_out: List[str] = []
+            if not validate_and_apply_patch(diff, cwd=worktree_path, dry_run=True, logger=candidate_logger, error_out=error_out):
                 last_rejection = "malformed"
+                self._last_malformed_detail = error_out[0] if error_out else ""
                 continue
 
             dup_threshold = self.config.get('duplicate_threshold', 0.25)
@@ -150,7 +158,7 @@ class EvolutionEngine:
                 self.pop_size = min(sizing.get('max_population', 10), self.pop_size + 1)
         return False
 
-    def _record_exhausted_slot(self, goal: str, rejection: str) -> None:
+    def _record_exhausted_slot(self, goal: str, rejection: str, detail: str = "") -> None:
         outcome = "duplicate_exhausted" if rejection == "duplicate" else "failure"
         self.db.store_experiment(
             hypothesis=goal,
@@ -159,6 +167,11 @@ class EvolutionEngine:
             metrics={},
             outcome=outcome,
             failure_reason=f"exhausted {rejection} retries with no usable diff",
+            # The last retry attempt's real git-apply diagnostic for a
+            # "malformed" exhaustion - there's no equivalent real trace for
+            # a "duplicate" exhaustion (nothing failed to apply, it was
+            # rejected for being too similar to a past attempt).
+            traceback=detail or None,
         )
 
     def _generate_population(self, goal: str, n: int, mutation_source: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
@@ -178,7 +191,7 @@ class EvolutionEngine:
             elif self.duplicate_exhausted_count > before_dup:
                 self._record_exhausted_slot(goal, "duplicate")
             elif self.generation_failed_count > before_fail:
-                self._record_exhausted_slot(goal, "malformed")
+                self._record_exhausted_slot(goal, "malformed", self._last_malformed_detail)
         return generation
 
     def run(self, goal: str):
@@ -223,7 +236,8 @@ class EvolutionEngine:
                     rationale=f"Generation {gen} candidate",
                     metrics=c['metrics'],
                     outcome=outcome,
-                    failure_reason=c.get('error_msg', None)
+                    failure_reason=c.get('error_msg', None),
+                    traceback=c.get('traceback') or None,
                 )
 
             valid_scores = [c['composite_score'] for c in scored if 'composite_score' in c]

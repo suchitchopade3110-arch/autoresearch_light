@@ -63,16 +63,31 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
 
     # Only populated by AnthropicClient (see generation/patch_generator.py) -
     # MockLLMClient makes no API calls, so this is 0.0 for every mock run.
+    # Summed once, here, over each experiment's own single recorded cost -
+    # nothing else in this module or the dashboard re-aggregates it, so
+    # this total is never double-counted.
     total_generation_cost_usd = sum(e["metrics"].get("generation_cost_usd", 0.0) for e in experiments)
     total_generation_input_tokens = sum(e["metrics"].get("generation_input_tokens", 0) for e in experiments)
     total_generation_output_tokens = sum(e["metrics"].get("generation_output_tokens", 0) for e in experiments)
 
+    # energy_proxy only exists on evolutionary-mode experiments (see
+    # evolution/scoring.py) - sequential mode never computes it. None
+    # (not 0.0) when absent, so a sequential-only run reports "no data"
+    # rather than a misleading "zero energy used".
+    has_energy_proxy_data = any('energy_proxy' in e["metrics"] for e in experiments)
+    total_energy_proxy = (
+        sum(e["metrics"].get("energy_proxy", 0.0) for e in experiments) if has_energy_proxy_data else None
+    )
+
     approvals = approval_store.list_all() if approval_store else []
     approved = sum(1 for a in approvals if a["status"] == "approved")
+    # A distinct terminal state from "approved" (see approval/store.py) -
+    # a human never decided these, approval.auto_approve's criteria did.
+    auto_approved = sum(1 for a in approvals if a["status"] == "auto_approved")
     rejected = sum(1 for a in approvals if a["status"] == "rejected")
     timed_out = sum(1 for a in approvals if a["status"] == "timed_out")
     pending = sum(1 for a in approvals if a["status"] == "pending")
-    decided = approved + rejected + timed_out
+    decided = approved + auto_approved + rejected + timed_out
     approval_timeout_rate = timed_out / decided if decided else 0.0
 
     return {
@@ -90,9 +105,11 @@ def compute_kpis(db, approval_store=None, evolution_report_path: str = EVOLUTION
         "total_generation_cost_usd": total_generation_cost_usd,
         "total_generation_input_tokens": total_generation_input_tokens,
         "total_generation_output_tokens": total_generation_output_tokens,
+        "total_energy_proxy": total_energy_proxy,
         "approvals": {
             "pending": pending,
             "approved": approved,
+            "auto_approved": auto_approved,
             "rejected": rejected,
             "timed_out": timed_out,
             "timeout_rate": approval_timeout_rate,
@@ -105,6 +122,12 @@ def render_report_markdown(kpis: Dict[str, Any]) -> str:
         f"{kpis['compute_cost_per_improvement_seconds']:.2f}s"
         if kpis["compute_cost_per_improvement_seconds"] is not None
         else "n/a (no merged candidates yet)"
+    )
+    energy_line = (
+        f"- Energy proxy total: {kpis['total_energy_proxy']:.2f} (execution_time x a constant - "
+        "NOT a real energy/power measurement, see evolution/scoring.py; evolutionary mode only)\n"
+        if kpis.get("total_energy_proxy") is not None
+        else ""
     )
     return f"""# Run Report
 
@@ -124,10 +147,11 @@ Generated: {kpis['generated_at']}
 - Total compute time: {kpis['total_compute_seconds']:.2f}s
 - **Compute cost per improvement: {cost_line}**
 - LLM generation cost: ${kpis['total_generation_cost_usd']:.4f} ({kpis['total_generation_input_tokens']} in / {kpis['total_generation_output_tokens']} out tokens) - 0 for mock runs
-
+{energy_line}
 ## Human approval gate
 - Pending: {kpis['approvals']['pending']}
 - Approved: {kpis['approvals']['approved']}
+- Auto-approved (approval.auto_approve criteria, no human decision): {kpis['approvals']['auto_approved']}
 - Rejected: {kpis['approvals']['rejected']}
 - Timed out (held, not merged): {kpis['approvals']['timed_out']}
 - Timeout rate (of decided): {kpis['approvals']['timeout_rate']:.1%}

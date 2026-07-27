@@ -88,6 +88,7 @@
           <td class="p-2">
             <span class="px-2 py-0.5 rounded text-xs
               {% if a.status == 'approved' %}bg-emerald-100 text-emerald-800
+              {% elif a.status == 'auto_approved' %}bg-teal-100 text-teal-800
               {% elif a.status == 'rejected' %}bg-red-100 text-red-800
               {% else %}bg-amber-100 text-amber-800{% endif %}">{{ a.status }}</span>
           </td>

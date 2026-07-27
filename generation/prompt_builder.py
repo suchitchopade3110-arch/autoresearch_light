@@ -26,6 +26,15 @@ class PromptBuilder:
             for f in failures:
                 prompt += f"Hypothesis: {f['hypothesis']}\n"
                 prompt += f"Failure Reason: {f['failure_reason'][:500]}\n" # Trim long traces
+                # The real diagnostic (a git-apply error or the candidate's
+                # actual stderr), when one exists - distinct from
+                # failure_reason above, which for several failure
+                # categories is just a human-readable label with no
+                # underlying trace (see memory/failure_analysis.py). Feeds
+                # the real signal into the next generation, not just the
+                # category it was filed under.
+                if f.get('traceback'):
+                    prompt += f"Traceback:\n{f['traceback'][:1000]}\n"
                 prompt += f"Diff:\n{f['diff']}\n\n"
 
         # Retrieve past successes

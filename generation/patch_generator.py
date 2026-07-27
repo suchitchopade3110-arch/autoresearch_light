@@ -225,7 +225,10 @@ class AnthropicClient(LLMClient):
         }
         return diff
 
-def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_run: bool = False, logger=None) -> bool:
+def validate_and_apply_patch(
+    diff_content: str, cwd: Optional[str] = None, dry_run: bool = False, logger=None,
+    error_out: Optional[List[str]] = None,
+) -> bool:
     """
     Validates a patch by attempting to apply it cleanly, then applies it
     unless `dry_run` is set. `cwd` is the git working tree the patch should
@@ -238,6 +241,15 @@ def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_r
     without it, every successful call mutates `cwd`'s working tree for
     real, so checking the same diff twice would fail the second time.
     Returns True if successful, False otherwise.
+
+    error_out, if given, gets git's real failure text (e.g. "error: patch
+    failed: file.py:10") appended on failure - previously this was only
+    ever logged and then discarded, so every malformed-diff failure record
+    looked identical regardless of what was actually wrong with that
+    particular diff. A caller-supplied list rather than an attribute on
+    this module-level function, since evolution/scheduler.py calls this
+    concurrently across threads and a shared/global "last error" would
+    race between candidates.
     """
     fd, patch_file = tempfile.mkstemp(suffix=".patch")
     try:
@@ -256,7 +268,14 @@ def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_r
             subprocess.run(["git", "apply", patch_file], check=True, capture_output=True, cwd=cwd)
         return True
     except subprocess.CalledProcessError as e:
-        (logger or _module_logger).warning(f"Patch validation/application failed: {e.stderr}")
+        # capture_output=True without text=True means e.stderr is raw
+        # bytes - must be decoded before it can be logged readably or
+        # stored anywhere structured (ChromaDB metadata rejects bytes
+        # outright; see memory/db.py's traceback field).
+        stderr_text = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        (logger or _module_logger).warning(f"Patch validation/application failed: {stderr_text}")
+        if error_out is not None:
+            error_out.append(stderr_text)
         return False
     finally:
         if os.path.exists(patch_file):
@@ -265,6 +284,12 @@ def validate_and_apply_patch(diff_content: str, cwd: Optional[str] = None, dry_r
 class PatchGenerator:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
+        # Set by generate_and_apply() on the file whose patch failed to
+        # apply, cleared at the start of every call - callers that want it
+        # (see orchestrator/run.py) must read it immediately after the
+        # call, the same way AnthropicClient.last_usage is read immediately
+        # after generate_diff.
+        self.last_apply_error: str = ""
 
     def generate_and_apply(self, prompt: str, target_file: Union[str, List[str]], cwd: Optional[str] = None, logger=None) -> bool:
         """
@@ -288,6 +313,7 @@ class PatchGenerator:
         """
         log = logger or _module_logger
         target_files = [target_file] if isinstance(target_file, str) else list(target_file)
+        self.last_apply_error = ""
 
         diffs = []
         for f in target_files:
@@ -302,7 +328,9 @@ class PatchGenerator:
             log.info(f"Generated diff:\n{diff}")
             diffs.append(diff)
 
-            if not validate_and_apply_patch(diff, cwd=cwd, logger=log):
+            error_out: List[str] = []
+            if not validate_and_apply_patch(diff, cwd=cwd, logger=log, error_out=error_out):
+                self.last_apply_error = error_out[0] if error_out else ""
                 return False, "\n".join(diffs)
 
         return True, "\n".join(diffs)

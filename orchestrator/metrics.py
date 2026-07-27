@@ -29,7 +29,7 @@ def _execution_speed(result: Dict[str, Any]) -> float:
 
 @register_metric("execution_time")
 def _execution_time(result: Dict[str, Any]) -> float:
-    # Without this, evolution/scoring.py's energy_estimate derivation (which
+    # Without this, evolution/scoring.py's energy_proxy derivation (which
     # checks for 'execution_time' in the metrics dict) never fires - it
     # always fell through to its hardcoded default regardless of how long a
     # candidate actually ran, and reporting has no real compute-cost signal
